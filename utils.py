@@ -30,20 +30,167 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+def is_factual(sentence: str) -> bool:
+    """
+    Check karta hai ke sentence mein koi factual claim hai ya nahi.
+    
+    Factual claim hoti hai jab sentence mein ho:
+    - Numbers (500, 1700)
+    - Percentages (15%, 30%)
+    - Currency ($30 billion, Rs 500)
+    - Death/casualty words (killed, died, dead, injured)
+    - Date indicators (in 2022, January, on Monday)
+    - Quantity words (million, billion, thousand, hundred)
+    - Measurement words (km, kg, meter, acre)
+    """
+
+    factual_patterns = [
+        r'\d+',                                          # koi bhi number: 500, 1700
+        r'\d+\.?\d*\s?%',                               # percentage: 15%, 30.5%
+        r'[\$£€₹]\s?\d+',                               # currency: $30, Rs500
+        r'\d+\s?(million|billion|thousand|hundred)',     # large numbers: 30 million
+        r'\b(killed|died|dead|deaths|casualties|'
+        r'injured|wounded|missing|arrested)\b',         # death/incident words
+        r'\b(january|february|march|april|may|june|'
+        r'july|august|september|october|november|'
+        r'december)\b',                                  # month names
+        r'\bin\s+\d{4}\b',                              # year: in 2022
+        r'\d+\s?(km|kg|meter|acre|hectare|liter)',      # measurements
+        r'\b(increased|decreased|rose|fell|dropped|'
+        r'surged|declined)\s+by\s+\d+',                # change with number
+    ]
+
+    sentence_lower = sentence.lower()
+    for pattern in factual_patterns:
+        if re.search(pattern, sentence_lower):
+            return True
+    return False
+
+
+def is_too_vague(sentence: str) -> bool:
+    """
+    Vague sentences filter karta hai jo contradiction ke liye useless hain.
+    
+    Vague sentence hoti hai jab:
+    - Bohat choti ho (40 words se kam characters)
+    - Sirf opinion ho (said, stated, mentioned, claimed - bina fact ke)
+    - Generic filler words hon
+    """
+
+    # Too short
+    if len(sentence) < 50:
+        return True
+
+    # Sirf "someone said something" — no actual fact
+    vague_patterns = [
+        r'^(he|she|they|it|this|that)\s+(is|was|are|were)\s+\w+\.$',
+        r'\b(very|quite|really|extremely)\s+(bad|good|important|serious)\b',
+        r'^(officials?|authorities|government)\s+said\s+the\s+situation',
+    ]
+    sentence_lower = sentence.lower().strip()
+    for pattern in vague_patterns:
+        if re.search(pattern, sentence_lower):
+            return True
+    return False
+
+
+def remove_duplicates(sentences: list[str], 
+                       threshold: float = 0.85) -> list[str]:
+    """
+    Bohat similar sentences remove karta hai.
+    
+    Simple word-overlap method use karta hai:
+    agar do sentences ke 85% words same hain to duplicate maano.
+    """
+    unique = []
+    for sent in sentences:
+        words_new = set(sent.lower().split())
+        is_duplicate = False
+
+        for existing in unique:
+            words_existing = set(existing.lower().split())
+
+            # Jaccard similarity: common words / total unique words
+            if len(words_new | words_existing) == 0:
+                continue
+            similarity = len(words_new & words_existing) / \
+                         len(words_new | words_existing)
+
+            if similarity >= threshold:
+                is_duplicate = True
+                break
+
+        if not is_duplicate:
+            unique.append(sent)
+
+    return unique
+
+
+def score_sentence(sentence: str) -> int:
+    """
+    Sentence ko score deta hai — zyada score = zyada factual/important.
+    
+    Scoring logic:
+    +3  : death/casualty words (sabse important contradiction point)
+    +2  : currency/money amount
+    +2  : large number (million/billion)
+    +1  : any number
+    +1  : percentage
+    +1  : date/year
+    """
+    score = 0
+    s = sentence.lower()
+
+    if re.search(r'\b(killed|died|dead|deaths|casualties|injured)\b', s):
+        score += 3
+    if re.search(r'[\$£€₹]\s?\d+|\d+\s?(million|billion)', s):
+        score += 2
+    if re.search(r'\d+\.?\d*\s?%', s):
+        score += 1
+    if re.search(r'\bin\s+\d{4}\b', s):
+        score += 1
+    if re.search(r'\d+', s):
+        score += 1
+
+    return score
+
+
 def extract_sentences(text: str, max_sentences: int = 6) -> list[str]:
     """
-    Split article into sentences and return top factual ones.
-    Prioritizes sentences with numbers or proper nouns (more likely factual claims).
+    Main function — article text se top factual sentences nikalta hai.
+    
+    Pipeline:
+    1. Text ko sentences mein split karo
+    2. Clean karo (whitespace, etc.)
+    3. Vague/too-short sentences filter karo
+    4. Factual sentences prefer karo
+    5. Duplicates remove karo
+    6. Score ke basis pe sort karo
+    7. Top N return karo
     """
-    # Split on sentence boundaries
+
+    # Step 1: Split into sentences
     raw = re.split(r'(?<=[.!?])\s+', text)
-    sentences = [clean_text(s) for s in raw if len(clean_text(s)) > 40]
 
-    # Prefer factual sentences (numbers, capitalized entities)
-    factual = [s for s in sentences if re.search(r'\d+|[A-Z][a-z]{2,}', s)]
-    other   = [s for s in sentences if s not in factual]
+    # Step 2: Clean each sentence
+    sentences = [clean_text(s) for s in raw if clean_text(s)]
 
+    # Step 3: Remove vague/too-short sentences
+    sentences = [s for s in sentences if not is_too_vague(s)]
+
+    # Step 4: Separate factual vs non-factual
+    factual = [s for s in sentences if is_factual(s)]
+    other   = [s for s in sentences if not is_factual(s)]
+
+    # Step 5: Remove duplicates from factual sentences
+    factual = remove_duplicates(factual)
+
+    # Step 6: Sort factual sentences by score (highest first)
+    factual = sorted(factual, key=score_sentence, reverse=True)
+
+    # Step 7: Combine — factual first, then others as backup
     combined = factual + other
+
     return combined[:max_sentences]
 
 
