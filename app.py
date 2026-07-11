@@ -1,7 +1,10 @@
 import streamlit as st
 from utils import (
-    load_model, load_similarity_model, analyze_articles,
-    LABEL_EMOJI, LABEL_COLOR
+    load_model, 
+    load_similarity_model, 
+    analyze_articles, 
+    LABEL_EMOJI, 
+    LABEL_COLOR
 )
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
