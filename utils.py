@@ -77,6 +77,7 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             for idx_j, s2 in enumerate(art_j['sentences']):
                 sim_score = float(cosine_scores[idx_i][idx_j])
 
+                # Context matching bracket
                 if sim_score < 0.30:
                     continue
                 
@@ -88,9 +89,8 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
 
         raw_scores_f = nli_model.predict(pairs_forward, batch_size=64, show_progress_bar=False)
         
-        # 🛡️ BACKEND DEDUPLICATION METRIC TRACKERS
-        seen_sentences_1 = set()
-        seen_sentences_2 = set()
+        # 🔥 MATHEMATICAL PAIR DEDUPLICATION SIGNATURES
+        seen_pair_hashes = set()
         
         for idx in range(len(metadata_pairs)):
             probs_f = F.softmax(torch.tensor(raw_scores_f[idx]), dim=0)
@@ -104,14 +104,15 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
                 s1_clean = meta['s1'].strip().lower()
                 s2_clean = meta['s2'].strip().lower()
                 
-                # 🔥 STRICT ISOLATION FILTER: 
-                # Agar koi sentence pehle hi kisi contradiction card mein use ho chuka hai, 
-                # toh use doobara naye variations ke sath repeat nahi hone dena.
-                if s1_clean in seen_sentences_1 or s2_clean in seen_sentences_2 or s1_clean in seen_sentences_2 or s2_clean in seen_sentences_1:
+                # Bi-directional pair validation signature tracking
+                # S1 + S2 aur S2 + S1 dono ko strictly track karega
+                pair_signature = (s1_clean, s2_clean)
+                reverse_signature = (s2_clean, s1_clean)
+                
+                if pair_signature in seen_pair_hashes or reverse_signature in seen_pair_hashes:
                     continue
                 
-                seen_sentences_1.add(s1_clean)
-                seen_sentences_2.add(s2_clean)
+                seen_pair_hashes.add(pair_signature)
 
                 pair_results.append({
                     'sentence_1': meta['s1'],
@@ -121,6 +122,7 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
                     'similarity': meta['sim_score']
                 })
 
+        # Sorting results based on high model precision parameters
         pair_results.sort(key=lambda x: (-x['confidence'], -x['similarity']))
 
         findings.append({
