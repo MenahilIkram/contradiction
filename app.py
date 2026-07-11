@@ -1,10 +1,11 @@
 import streamlit as st
 from utils import load_model, load_similarity_model, analyze_articles
 
-# ─── Page Styling & Configuration ─────────────────────────────────────────────
+# ─── Page Configuration ───────────────────────────────────────────────────────
 st.set_page_config(page_title="AI Contradiction Detector", page_icon="🔍", layout="wide")
 
-st.markdown("""
+# 🔥 PYTHON 3.14 BUG FIX: Streamlit Cloud par st.markdown crash se bachne ke liye st.html use kiya hai
+st.html("""
     <style>
     .reportview-container { background: #f5f7f8; }
     .main-title { font-size: 40px; font-weight: bold; color: #1E3A8A; text-align: center; margin-bottom: 30px; }
@@ -12,9 +13,8 @@ st.markdown("""
     .source-tag { font-weight: bold; color: #1E3A8A; font-size: 14px; margin-bottom: 5px; }
     .sentence-text { font-style: italic; color: #333333; font-size: 16px; background-color: #fdf2f2; padding: 8px; border-radius: 5px; margin: 5px 0; }
     </style>
-""", unsafe_allowed_html=True)
-
-st.markdown("<div class='main-title'>🔍 AI Contradiction Detector Dashboard</div>", unsafe_allowed_html=True)
+    <div class='main-title'>🔍 AI Contradiction Detector Dashboard</div>
+""")
 
 # ─── Model Lazy Loading ───────────────────────────────────────────────────────
 with st.spinner("🔄 Loading High-Accuracy AI Models... Please wait (Takes a few seconds first time)"):
@@ -54,7 +54,6 @@ def read_docx(file) -> str:
 st.sidebar.header("📁 Upload Articles")
 st.sidebar.write("Upload exactly 2 documents (PDF, DOCX, or TXT) to compare.")
 
-# `type` parameter mein 'docx' bhi add kar diya hai
 file1 = st.sidebar.file_uploader("Upload Article 1", type=["txt", "pdf", "docx"], key="art1")
 file2 = st.sidebar.file_uploader("Upload Article 2", type=["txt", "pdf", "docx"], key="art2")
 
@@ -100,7 +99,8 @@ if st.sidebar.button("🚀 Analyze Documents", use_container_width=True):
                     st.info("🎉 Exceptional Consistency: No contradictions detected across these documents!")
                 else:
                     for res in finding['results']:
-                        st.markdown(f"""
+                        # Card rendering optimized with dynamic HTML handling
+                        st.html(f"""
                             <div class="card">
                                 <div class="source-tag">📄 {finding['source_1']}</div>
                                 <div class="sentence-text">"{res['sentence_1']}"</div>
@@ -108,7 +108,7 @@ if st.sidebar.button("🚀 Analyze Documents", use_container_width=True):
                                 <div class="source-tag">📄 {finding['source_2']}</div>
                                 <div class="sentence-text">"{res['sentence_2']}"</div>
                             </div>
-                        """, unsafe_allowed_html=True)
+                        """)
         else:
             st.error("❌ Could not extract enough clear text from the uploaded files. Check file encoding.")
 else:
