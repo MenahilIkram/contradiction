@@ -1,6 +1,6 @@
 import streamlit as st
 from utils import (
-    load_model, analyze_articles,
+    load_model, load_similarity_model, analyze_articles,
     LABEL_EMOJI, LABEL_COLOR
 )
 
@@ -168,9 +168,10 @@ st.markdown("""
 
 
 # ─── Load Model ───────────────────────────────────────────────────────────────
-with st.spinner("⚡ Loading NLI model (first load takes ~30s)..."):
-    model = load_model()
-st.success("✅ Model loaded!", icon="🤖")
+with st.spinner("⚡ Loading models (first load takes ~30s)..."):
+    model     = load_model()
+    sim_model = load_similarity_model()
+st.success("✅ Models loaded!", icon="🤖")
 
 
 # ─── Article Input Section ─────────────────────────────────────────────────────
@@ -225,7 +226,7 @@ if analyze_clicked:
         st.stop()
 
     with st.spinner("🧠 Analyzing articles... this may take a moment"):
-        findings = analyze_articles(model, filled)
+        findings = analyze_articles(model, sim_model, filled)
 
     st.markdown("<hr class='divider'>", unsafe_allow_html=True)
     st.markdown("### 📊 Results")
