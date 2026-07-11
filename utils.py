@@ -16,9 +16,8 @@ def load_model():
 @st.cache_resource(show_spinner=False)
 def load_similarity_model():
     """
-    Sentence similarity model — check karta hai ke do sentences
-    same topic pe hain ya nahi.
-    Agar same topic nahi to NLI model ko call hi nahi karte — false positives avoid.
+    Sentence similarity model — same topic check karta hai.
+    Alag topic hain to NLI call hi nahi karte — false positives avoid.
     """
     return SentenceTransformer('all-MiniLM-L6-v2')
 
@@ -79,7 +78,6 @@ def is_too_vague(sentence: str) -> bool:
     """
     Useless sentences filter karo.
     5 words se kam = incomplete.
-    Generic filler = useless.
     """
     if len(sentence.split()) < 5:
         return True
@@ -161,7 +159,6 @@ def extract_sentences(text: str,
 
     factual = remove_duplicates(factual)
     other   = remove_duplicates(other)
-
     factual = sorted(factual, key=score_sentence, reverse=True)
 
     return factual[:max_factual] + other[:max_other]
@@ -171,25 +168,11 @@ def extract_sentences(text: str,
 
 def are_same_topic(sim_model: SentenceTransformer,
                    s1: str, s2: str,
-                   threshold: float = 0.35) -> bool:
+                   threshold: float = 0.45) -> bool:
     """
-    Check karo ke dono sentences same topic pe hain ya nahi.
-
-    Cosine similarity use karta hai sentence embeddings pe.
-    0.35 se kam = completely alag topic = NLI call skip karo.
-
-    YE FIX KYUN ZAROORI THA:
-    Pehle model "900 deaths" vs "UN $160M appeal" ko
-    97% contradiction bol raha tha — kyunki dono mein
-    alag numbers hain but topic hi same nahi tha.
-    Ab ye filter pehle check karta hai — alag topic = skip.
-
-    Threshold 0.35 kyun:
-    - 0.0  = completely unrelated  (deaths vs cricket score)
-    - 0.35 = loosely same topic    (deaths vs relief money — both flood related)
-    - 0.7+ = almost same sentence
-    0.35 pe rakh rahe hain taake same-event different-aspect
-    sentences bhi compare hon.
+    Cosine similarity se check karo ke dono sentences
+    same topic pe hain ya nahi.
+    0.45 se kam = alag topic = NLI call skip karo.
     """
     emb1       = sim_model.encode(s1, convert_to_tensor=True)
     emb2       = sim_model.encode(s2, convert_to_tensor=True)
@@ -197,14 +180,187 @@ def are_same_topic(sim_model: SentenceTransformer,
     return similarity >= threshold
 
 
+# ─── Numerical Contradiction Detector ────────────────────────────────────────
+
+# Generic stopwords — ye words "context" mein count nahi honge
+# Sirf meaningful/content words se context decide hoga
+STOPWORDS = {
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
+    'could', 'should', 'may', 'might', 'shall', 'can', 'to', 'of',
+    'in', 'on', 'at', 'by', 'for', 'with', 'about', 'as', 'into',
+    'through', 'during', 'from', 'up', 'down', 'out', 'and', 'or',
+    'but', 'not', 'no', 'so', 'yet', 'both', 'either', 'that',
+    'this', 'these', 'those', 'it', 'its', 'than', 'then', 'their',
+    'they', 'them', 'he', 'she', 'we', 'us', 'our', 'also', 'just',
+    'more', 'most', 'other', 'some', 'such', 'only', 'own', 'same',
+    'according', 'per', 'across', 'after', 'before', 'between',
+    'each', 'further', 'here', 'how', 'i', 'me', 'my', 'over',
+    'very', 'well', 'what', 'when', 'where', 'which', 'while',
+    'who', 'whom', 'why', 'your', 'all', 'any', 'been', 'being',
+    'reported', 'said', 'noted', 'stated', 'confirmed', 'launched',
+    'seeking', 'including', 'around', 'approximately', 'nearly',
+    'least', 'total', 'related', 'due', 'continued', 'estimated',
+}
+
+
+def extract_context_words(sentence: str) -> set:
+    """
+    Sentence se sirf meaningful/content words nikalo.
+
+    GENERAL approach — koi hardcoded keywords nahi:
+    - Stopwords hata do
+    - Numbers hata do (alag handle hote hain)
+    - Jo bache wo content words hain
+
+    Example:
+    "1700 people killed in Pakistan floods"
+    → stopwords hata do: {people, killed, pakistan, floods}
+
+    "900 flood deaths reported in country"
+    → stopwords hata do: {flood, deaths, country}
+
+    Common content words: {flood, deaths/killed}
+    → Same topic confirm ✅
+    """
+    words = re.sub(r'[^a-zA-Z\s]', '', sentence.lower()).split()
+    content = {w for w in words
+               if w not in STOPWORDS and len(w) > 2}
+    return content
+
+
+def have_common_context(s1: str, s2: str,
+                         min_common: int = 1) -> bool:
+    """
+    Dono sentences mein kam se kam 1 common content word hona chahiye.
+
+    Ye ensure karta hai ke numbers same topic ke baare mein hain.
+
+    Example:
+    s1: "1700 people killed in floods"     → {people, killed, floods}
+    s2: "900 flood deaths reported"        → {flood, deaths}
+    Common: {} ... 'flood'/'floods' stem same hai but exact match nahi
+
+    Isliye partial matching bhi karte hain:
+    agar koi word dusre ka substring hai (flood/floods) to bhi match
+    """
+    words1 = extract_context_words(s1)
+    words2 = extract_context_words(s2)
+
+    # Exact common words
+    exact_common = words1 & words2
+    if len(exact_common) >= min_common:
+        return True
+
+    # Partial match — "flood" in "floods", "kill" in "killed"
+    for w1 in words1:
+        for w2 in words2:
+            # Agar ek dusre ka prefix hai (stem matching)
+            if len(w1) >= 4 and len(w2) >= 4:
+                if w1.startswith(w2[:4]) or w2.startswith(w1[:4]):
+                    return True
+
+    return False
+
+
+def extract_numbers_general(text: str) -> list:
+    """
+    Text se numbers nikalo — billion/million properly convert karo.
+
+    GENERAL — koi domain specific logic nahi:
+    "30 billion" → 30,000,000,000
+    "15 million" → 15,000,000
+    "1,700"      → 1700
+    "15%"        → 15 (percentage)
+    "1.5"        → 1.5
+    """
+    text = text.lower()
+    numbers = []
+
+    # Billion wale
+    for match in re.finditer(r'(\d+\.?\d*)\s*billion', text):
+        numbers.append(float(match.group(1)) * 1_000_000_000)
+
+    # Million wale
+    for match in re.finditer(r'(\d+\.?\d*)\s*million', text):
+        numbers.append(float(match.group(1)) * 1_000_000)
+
+    # Thousand wale
+    for match in re.finditer(r'(\d+\.?\d*)\s*thousand', text):
+        numbers.append(float(match.group(1)) * 1_000)
+
+    # Comma wale (1,700 → 1700)
+    for match in re.finditer(r'\b(\d{1,3}(?:,\d{3})+)\b', text):
+        numbers.append(float(match.group(1).replace(',', '')))
+
+    # Plain numbers (sirf 10 se bade — chote numbers ignore)
+    for match in re.finditer(r'\b(\d+\.?\d*)\b', text):
+        val = float(match.group(1))
+        if val >= 10:
+            numbers.append(val)
+
+    return numbers
+
+
+def detect_numerical_contradiction(s1: str, s2: str) -> tuple:
+    """
+    Numbers wali sentences mein contradiction dhundta hai.
+
+    NLI model numbers ka exact fark nahi samajhta —
+    "1700 killed" vs "900 killed" dono ko related samajh ke
+    neutral ya entailment bol deta hai.
+
+    Ye function GENERAL rule-based approach use karta hai:
+
+    Step 1: Dono sentences se numbers nikalo
+    Step 2: Common context words check karo (same topic?)
+    Step 3: Numbers ka fark calculate karo
+    Step 4: 20% se zyada fark = CONTRADICTION
+             20% se kam fark  = ENTAILMENT (same figure)
+
+    Threshold 20% kyun:
+    - Alag sources mein thodi variation normal hai (rounding)
+    - 20% se zyada = genuinely different claim = contradiction
+    - $10B vs $15B = 33% fark = CONTRADICTION
+    - $10B vs $10.5B = 5% fark = same figure, ENTAILMENT
+    """
+    nums1 = extract_numbers_general(s1)
+    nums2 = extract_numbers_general(s2)
+
+    # Numbers nahi hain to kuch nahi kar sakte
+    if not nums1 or not nums2:
+        return None, 0.0
+
+    # Common context check — same topic ke baare mein hain?
+    if not have_common_context(s1, s2):
+        return None, 0.0
+
+    # Largest numbers compare karo (main claim wala number)
+    n1 = max(nums1)
+    n2 = max(nums2)
+
+    if n1 == 0 or n2 == 0:
+        return None, 0.0
+
+    # Fark percentage mein
+    diff_pct = abs(n1 - n2) / max(n1, n2)
+
+    if diff_pct > 0.20:
+        # Jitna zyada fark, utni zyada confidence
+        # 20% fark → 0.70 confidence
+        # 80% fark → 0.99 confidence
+        confidence = min(0.99, 0.55 + diff_pct)
+        return 'contradiction', round(confidence, 2)
+
+    # Same figure — entailment
+    return 'entailment', 0.75
+
+
 # ─── NLI Classification ──────────────────────────────────────────────────────
 
 def classify_pair(nli_model: CrossEncoder,
                   sent1: str, sent2: str) -> tuple:
-    """
-    CrossEncoder se classify karo.
-    Returns (label, confidence).
-    """
+    """CrossEncoder se classify karo. Returns (label, confidence)."""
     raw_scores = nli_model.predict([(sent1, sent2)])[0]
     probs      = F.softmax(torch.tensor(raw_scores), dim=0)
     pred_idx   = int(probs.argmax())
@@ -223,12 +379,13 @@ def analyze_articles(nli_model: CrossEncoder,
     Flow:
     1. Har article se sentences nikalo
     2. Har article combination ke liye pairs banao
-    3. PEHLE topic similarity check karo — alag topic = skip
-    4. Same topic hain to NLI classify karo
-    5. Sort karo — contradictions pehle, high confidence first
-    6. Top 8 per pair return karo
+    3. Topic similarity check (0.45 threshold) — alag topic skip
+    4. NLI model se classify karo
+    5. NLI ne neutral/low confidence diya?
+       → Numerical detector try karo (numbers wali sentences ke liye)
+    6. Sort — contradictions pehle, high confidence first
+    7. Top 8 per pair return karo
     """
-    # Step 1: Extract sentences
     parsed = []
     for art in articles:
         sents = extract_sentences(art['text'])
@@ -236,7 +393,6 @@ def analyze_articles(nli_model: CrossEncoder,
 
     findings = []
 
-    # Step 2: Har article combination
     for i, j in combinations(range(len(parsed)), 2):
         art_i = parsed[i]
         art_j = parsed[j]
@@ -246,13 +402,21 @@ def analyze_articles(nli_model: CrossEncoder,
         for s1 in art_i['sentences']:
             for s2 in art_j['sentences']:
 
-                # Step 3: Topic check PEHLE
-                # Alag topic = NLI call waste mat karo
+                # Step 3: Topic similarity check
                 if not are_same_topic(sim_model, s1, s2):
                     continue
 
-                # Step 4: Same topic hai — NLI classify karo
+                # Step 4: NLI classify
                 label, conf = classify_pair(nli_model, s1, s2)
+
+                # Step 5: NLI weak hai to numerical detector try karo
+                # NLI model 1700 vs 900 ko neutral bol deta hai
+                # Numerical detector specifically numbers ka fark check karta hai
+                if label in ('neutral', 'entailment') or conf < 0.65:
+                    num_label, num_conf = detect_numerical_contradiction(s1, s2)
+                    if num_label == 'contradiction':
+                        label = 'contradiction'
+                        conf  = num_conf
 
                 # Low confidence neutral = noise, skip
                 if label == 'neutral' and conf < 0.75:
@@ -265,12 +429,11 @@ def analyze_articles(nli_model: CrossEncoder,
                     'confidence': conf
                 })
 
-        # Step 5: Sort
+        # Sort: contradictions first, high confidence first
         pair_results.sort(
             key=lambda x: (x['label'] != 'contradiction', -x['confidence'])
         )
 
-        # Step 6: Top 8 per pair
         findings.append({
             'source_1': art_i['source'],
             'source_2': art_j['source'],
