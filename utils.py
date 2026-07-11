@@ -1,6 +1,7 @@
 import re
 import torch
 import torch.nn.functional as F
+from itertools import combinations
 from sentence_transformers import CrossEncoder
 import streamlit as st
 
@@ -12,134 +13,102 @@ def load_model():
 
 
 # Label order for this model: [contradiction, entailment, neutral]
-LABEL_MAP = {0: "contradiction", 1: "entailment", 2: "neutral"}
-LABEL_EMOJI = {
-    "contradiction": "❌",
-    "entailment": "✅",
-    "neutral": "🤷"
-}
-LABEL_COLOR = {
-    "contradiction": "#ff4b4b",
-    "entailment": "#00c853",
-    "neutral": "#888888"
-}
+LABEL_MAP   = {0: "contradiction", 1: "entailment", 2: "neutral"}
+LABEL_EMOJI = {"contradiction": "❌", "entailment": "✅", "neutral": "🤷"}
+LABEL_COLOR = {"contradiction": "#ff4b4b", "entailment": "#00c853", "neutral": "#888888"}
 
+
+# ─── Text Cleaning ────────────────────────────────────────────────────────────
 
 def clean_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 
+# ─── Factual Check ────────────────────────────────────────────────────────────
+
 def is_factual(sentence: str) -> bool:
     """
     Check karta hai ke sentence mein koi factual claim hai ya nahi.
-    
-    Factual claim hoti hai jab sentence mein ho:
-    - Numbers (500, 1700)
-    - Percentages (15%, 30%)
-    - Currency ($30 billion, Rs 500)
-    - Death/casualty words (killed, died, dead, injured)
-    - Date indicators (in 2022, January, on Monday)
-    - Quantity words (million, billion, thousand, hundred)
-    - Measurement words (km, kg, meter, acre)
+    Factual = numbers, currency, death words, dates, measurements.
     """
-
     factual_patterns = [
-        r'\d+',                                          # koi bhi number: 500, 1700
-        r'\d+\.?\d*\s?%',                               # percentage: 15%, 30.5%
-        r'[\$£€₹]\s?\d+',                               # currency: $30, Rs500
-        r'\d+\s?(million|billion|thousand|hundred)',     # large numbers: 30 million
-        r'\b(killed|died|dead|deaths|casualties|'
-        r'injured|wounded|missing|arrested)\b',         # death/incident words
-        r'\b(january|february|march|april|may|june|'
-        r'july|august|september|october|november|'
-        r'december)\b',                                  # month names
-        r'\bin\s+\d{4}\b',                              # year: in 2022
-        r'\d+\s?(km|kg|meter|acre|hectare|liter)',      # measurements
-        r'\b(increased|decreased|rose|fell|dropped|'
-        r'surged|declined)\s+by\s+\d+',                # change with number
+        r'\d+',
+        r'\d+\.?\d*\s?%',
+        r'[\$£€₹]\s?\d+',
+        r'\d+\s?(million|billion|thousand|hundred)',
+        r'\b(killed|died|dead|deaths|casualties|injured|wounded|missing|arrested)\b',
+        r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\b',
+        r'\bin\s+\d{4}\b',
+        r'\d+\s?(km|kg|meter|acre|hectare|liter)',
+        r'\b(increased|decreased|rose|fell|dropped|surged|declined)\s+by\s+\d+',
     ]
-
-    sentence_lower = sentence.lower()
+    s = sentence.lower()
     for pattern in factual_patterns:
-        if re.search(pattern, sentence_lower):
+        if re.search(pattern, s):
             return True
     return False
 
 
+# ─── Vague Check ─────────────────────────────────────────────────────────────
+
 def is_too_vague(sentence: str) -> bool:
     """
-    Vague sentences filter karta hai jo contradiction ke liye useless hain.
-
-    Vague sentence hoti hai jab:
-    - 5 words se kam ho (genuinely incomplete)
-    - Sirf generic filler ho bina kisi claim ke
+    Vague sentences filter karta hai.
+    5 words se kam = incomplete.
+    Generic filler patterns = useless.
     """
-
-    # 5 words se kam = incomplete sentence
     if len(sentence.split()) < 5:
         return True
 
-    # Clearly useless patterns
     vague_patterns = [
         r'^(he|she|they|it)\s+(is|was|are|were)\s+\w+\.$',
         r'\b(very|quite|really|extremely)\s+(bad|good|important|serious)\b',
         r'^(officials?|authorities)\s+said\s+the\s+situation',
     ]
-    sentence_lower = sentence.lower().strip()
+    s = sentence.lower().strip()
     for pattern in vague_patterns:
-        if re.search(pattern, sentence_lower):
+        if re.search(pattern, s):
             return True
     return False
 
 
-def remove_duplicates(sentences: list[str], 
-                       threshold: float = 0.85) -> list[str]:
+# ─── Duplicate Removal (Jaccard) ─────────────────────────────────────────────
+
+def remove_duplicates(sentences: list, threshold: float = 0.85) -> list:
     """
-    Bohat similar sentences remove karta hai.
-    
-    Simple word-overlap method use karta hai:
-    agar do sentences ke 85% words same hain to duplicate maano.
+    Bohat similar sentences remove karta hai using Jaccard similarity.
+    Jaccard = common words / total unique words
+    85% se zyada similar = duplicate.
     """
     unique = []
     for sent in sentences:
         words_new = set(sent.lower().split())
-        is_duplicate = False
-
+        is_dup = False
         for existing in unique:
-            words_existing = set(existing.lower().split())
-
-            # Jaccard similarity: common words / total unique words
-            if len(words_new | words_existing) == 0:
+            words_ex = set(existing.lower().split())
+            if len(words_new | words_ex) == 0:
                 continue
-            similarity = len(words_new & words_existing) / \
-                         len(words_new | words_existing)
-
-            if similarity >= threshold:
-                is_duplicate = True
+            sim = len(words_new & words_ex) / len(words_new | words_ex)
+            if sim >= threshold:
+                is_dup = True
                 break
-
-        if not is_duplicate:
+        if not is_dup:
             unique.append(sent)
-
     return unique
 
 
+# ─── Sentence Scoring ────────────────────────────────────────────────────────
+
 def score_sentence(sentence: str) -> int:
     """
-    Sentence ko score deta hai — zyada score = zyada factual/important.
-    
-    Scoring logic:
-    +3  : death/casualty words (sabse important contradiction point)
-    +2  : currency/money amount
-    +2  : large number (million/billion)
-    +1  : any number
-    +1  : percentage
-    +1  : date/year
+    Sentence ko importance score deta hai.
+    +3: death/casualty words
+    +2: currency/large numbers
+    +1: percentage, year, any number
     """
     score = 0
     s = sentence.lower()
-
     if re.search(r'\b(killed|died|dead|deaths|casualties|injured)\b', s):
         score += 3
     if re.search(r'[\$£€₹]\s?\d+|\d+\s?(million|billion)', s):
@@ -150,78 +119,86 @@ def score_sentence(sentence: str) -> int:
         score += 1
     if re.search(r'\d+', s):
         score += 1
-
     return score
 
 
-def extract_sentences(text: str,
-                       max_factual: int = 5,
-                       max_other: int = 4) -> list[str]:
-    """
-    Main function — article text se top sentences nikalta hai.
+# ─── Sentence Extraction ─────────────────────────────────────────────────────
 
-    IMPORTANT: Dono types rakho —
-    - Factual (numbers/currency/death words): numeric contradictions ke liye
+def extract_sentences(text: str, max_factual: int = 5, max_other: int = 4) -> list:
+    """
+    Article se top sentences nikalta hai — dono types:
+    - Factual (numbers/currency/deaths): numeric contradictions ke liye
     - Non-factual (pure language): semantic contradictions ke liye
-      jaise "safe" vs "dangerous", "won" vs "lost", "helped" vs "damaged"
-
-    Pipeline:
-    1. Text ko sentences mein split karo
-    2. Clean karo
-    3. Vague/too-short sentences filter karo
-    4. Factual aur non-factual alag karo
-    5. Dono se duplicates hatao
-    6. Factual ko score se sort karo
-    7. Dono se alag alag limit le ke combine karo
+      e.g. "safe" vs "dangerous", "won" vs "lost"
     """
-
-    # Step 1: Split into sentences
     raw = re.split(r'(?<=[.!?])\s+', text)
-
-    # Step 2: Clean
     sentences = [clean_text(s) for s in raw if clean_text(s)]
-
-    # Step 3: Remove vague sentences
     sentences = [s for s in sentences if not is_too_vague(s)]
 
-    # Step 4: Separate factual vs non-factual
     factual = [s for s in sentences if is_factual(s)]
     other   = [s for s in sentences if not is_factual(s)]
 
-    # Step 5: Remove duplicates from both
     factual = remove_duplicates(factual)
     other   = remove_duplicates(other)
 
-    # Step 6: Sort factual by importance score
     factual = sorted(factual, key=score_sentence, reverse=True)
 
-    # Step 7: Take from BOTH — dono types cover honge
-    # Factual: numbers/currency/death = numeric contradictions
-    # Other: language-based = semantic contradictions
-    combined = factual[:max_factual] + other[:max_other]
-
-    return combined
+    return factual[:max_factual] + other[:max_other]
 
 
-def classify_pair(model: CrossEncoder, sent1: str, sent2: str) -> tuple[str, float]:
+# ─── NLI Classification ──────────────────────────────────────────────────────
+
+def classify_pair(model: CrossEncoder, sent1: str, sent2: str) -> tuple:
     """
-    Classify a sentence pair as contradiction / entailment / neutral.
-    Returns (label, confidence_0_to_1).
+    Do sentences ko NLI model se classify karo.
+    Returns (label, confidence).
+    Labels: contradiction / entailment / neutral
     """
-    raw_scores = model.predict([(sent1, sent2)])[0]          # shape: (3,)
-    probs      = F.softmax(torch.tensor(raw_scores), dim=0)  # normalize
+    raw_scores = model.predict([(sent1, sent2)])[0]
+    probs      = F.softmax(torch.tensor(raw_scores), dim=0)
     pred_idx   = int(probs.argmax())
     confidence = float(probs[pred_idx])
     return LABEL_MAP[pred_idx], confidence
 
 
-def analyze_articles(model: CrossEncoder, articles: list[dict]) -> list[dict]:
+# ─── Duplicate Pair Removal ───────────────────────────────────────────────────
+
+def remove_duplicate_pairs(results: list) -> list:
     """
-    Compare all article pairs and return list of results.
-    Each article dict: {'source': str, 'text': str}
-    Returns list of finding dicts.
+    Agar ek hi sentence multiple pairs mein aa rahi ho
+    to sirf sabse confident wali pair rakho.
+
+    Example:
+    "1700 killed" vs "900 killed"   conf 0.91  <- rakho
+    "1700 killed" vs "500 injured"  conf 0.65  <- hatao
+    (sentence_1 repeat ho rahi hai, sirf best wali rakho)
     """
-    # Extract sentences from each article
+    seen_s1 = set()
+    unique  = []
+    for r in results:
+        key = r['sentence_1'][:60]
+        if key not in seen_s1:
+            seen_s1.add(key)
+            unique.append(r)
+    return unique
+
+
+# ─── Main Analysis ───────────────────────────────────────────────────────────
+
+def analyze_articles(model: CrossEncoder, articles: list) -> list:
+    """
+    Har article pair ke beech contradiction/entailment/neutral dhundta hai.
+
+    Flow:
+    1. Har article se sentences nikalo
+    2. Har article combination ke liye pairs banao
+    3. Har pair classify karo
+    4. Zyada results ko smart filter karo:
+       - Contradictions: top 5 (high confidence, no duplicate sentences)
+       - Entailments:    top 3
+       - Neutral:        top 2
+    """
+    # Step 1: Sentences extract karo
     parsed = []
     for art in articles:
         sents = extract_sentences(art['text'])
@@ -229,37 +206,57 @@ def analyze_articles(model: CrossEncoder, articles: list[dict]) -> list[dict]:
 
     findings = []
 
-    # Compare every pair of articles
+    # Step 2: Har article pair ke liye
     for i, j in combinations(range(len(parsed)), 2):
         art_i = parsed[i]
         art_j = parsed[j]
 
-        pair_results = []
+        all_pairs = []
+
+        # Step 3: Har sentence pair classify karo
         for s1 in art_i['sentences']:
             for s2 in art_j['sentences']:
                 label, conf = classify_pair(model, s1, s2)
-                # Only keep confident predictions (skip low-confidence neutral)
+
+                # Low confidence neutral = noise, skip
                 if label == 'neutral' and conf < 0.75:
                     continue
-                pair_results.append({
+
+                all_pairs.append({
                     'sentence_1': s1,
                     'sentence_2': s2,
                     'label':      label,
                     'confidence': conf
                 })
 
-        # Sort: contradictions first, then by confidence desc
-        pair_results.sort(
-            key=lambda x: (x['label'] != 'contradiction', -x['confidence'])
+        # Sort: contradictions first, phir confidence high se low
+        all_pairs.sort(key=lambda x: (x['label'] != 'contradiction', -x['confidence']))
+
+        # Step 4: Smart filtering — zyada results handle karna
+        # Problem: 9x9 = 81 pairs ho sakte hain, sab dikhana = UI flood
+        # Solution: alag alag bucket, duplicate sentences hatao, limit lagao
+
+        contradictions = [r for r in all_pairs if r['label'] == 'contradiction']
+        entailments    = [r for r in all_pairs if r['label'] == 'entailment']
+        neutrals       = [r for r in all_pairs if r['label'] == 'neutral']
+
+        # Duplicate sentences wali pairs hatao
+        contradictions = remove_duplicate_pairs(contradictions)
+        entailments    = remove_duplicate_pairs(entailments)
+
+        # Per category limit
+        final_results = (
+            contradictions[:5] +   # top 5 contradictions
+            entailments[:3]    +   # top 3 agreements
+            neutrals[:2]           # top 2 neutral
         )
 
         findings.append({
-            'source_1': art_i['source'],
-            'source_2': art_j['source'],
-            'results':  pair_results[:8]   # top 8 per pair to keep it readable
+            'source_1':             art_i['source'],
+            'source_2':             art_j['source'],
+            'results':              final_results,
+            'total_pairs':          len(all_pairs),
+            'total_contradictions': len(contradictions)
         })
 
     return findings
-
-
-from itertools import combinations  # ensure import at top level
