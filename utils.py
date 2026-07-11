@@ -105,19 +105,30 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             pred_idx = int(probs.argmax())
             conf = float(probs[pred_idx])
             label = LABEL_MAP.get(pred_idx, "neutral")
+            meta = metadata_pairs[idx]
+            sim_score = meta['sim_score']
 
-            # High confidence threshold for strict accuracy
-            if label == 'contradiction' and conf > 0.75:
-                meta = metadata_pairs[idx]
+            # 🛡️ DYNAMIC CONFIDENCE CALIBRATION INTEGRATED 🛡️
+            is_valid = False
+            if label == 'contradiction':
+                # Rule 1: Same exact topic/metric pe strong match hai, accept normal confidence (>0.75)
+                if sim_score >= 0.52 and conf > 0.75:
+                    is_valid = True
+                # Rule 2: Borderline semantic connection hai (jaise narrative shift), demand extreme confidence (>=0.90)
+                elif sim_score >= 0.42 and conf >= 0.90:
+                    is_valid = True
+
+            # Agar dynamic rules criteria cross ho jaye, toh entry save karo
+            if is_valid:
                 pair_results.append({
                     'sentence_1': meta['s1'],
                     'sentence_2': meta['s2'],
                     'label': label,
                     'confidence': conf,
-                    'similarity': meta['sim_score']
+                    'similarity': sim_score
                 })
 
-        # Sort results based on top contradiction confidence
+        # Sort results based on top contradiction confidence and similarity
         pair_results.sort(key=lambda x: (-x['confidence'], -x['similarity']))
 
         findings.append({
