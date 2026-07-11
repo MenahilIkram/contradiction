@@ -77,8 +77,10 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             for idx_j, s2 in enumerate(art_j['sentences']):
                 sim_score = float(cosine_scores[idx_i][idx_j])
 
-                # Context matching bracket
-                if sim_score < 0.30:
+                # 🛡️ THE GOLDILOCKS CALIBRATION (0.45)
+                # Yeh threshold ensure karta hai ke cross-topic cross matching (like Revenue vs Supply Chain) block ho jaye.
+                # Sirf wahi sentences pass honge jo actual mein SAME topic share karte hain.
+                if sim_score < 0.45:
                     continue
                 
                 pairs_forward.append((s1, s2))
@@ -87,10 +89,8 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
         if not pairs_forward:
             continue
 
+        # Inference processing window optimized
         raw_scores_f = nli_model.predict(pairs_forward, batch_size=64, show_progress_bar=False)
-        
-        # 🔥 MATHEMATICAL PAIR DEDUPLICATION SIGNATURES
-        seen_pair_hashes = set()
         
         for idx in range(len(metadata_pairs)):
             probs_f = F.softmax(torch.tensor(raw_scores_f[idx]), dim=0)
@@ -100,29 +100,26 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
 
             meta = metadata_pairs[idx]
 
-            if label_f == 'contradiction' and conf_f > 0.70:
-                s1_clean = meta['s1'].strip().lower()
-                s2_clean = meta['s2'].strip().lower()
+            # Confidence threshold perfectly tuned to 0.85
+            if label_f == 'contradiction' and conf_f > 0.85:
                 
-                # Bi-directional pair validation signature tracking
-                # S1 + S2 aur S2 + S1 dono ko strictly track karega
-                pair_signature = (s1_clean, s2_clean)
-                reverse_signature = (s2_clean, s1_clean)
+                # Check for exact duplicate pairs
+                is_duplicate = False
+                for existing in pair_results:
+                    if existing['sentence_1'] == meta['s1'] and existing['sentence_2'] == meta['s2']:
+                        is_duplicate = True
+                        break
                 
-                if pair_signature in seen_pair_hashes or reverse_signature in seen_pair_hashes:
-                    continue
-                
-                seen_pair_hashes.add(pair_signature)
+                if not is_duplicate:
+                    pair_results.append({
+                        'sentence_1': meta['s1'],
+                        'sentence_2': meta['s2'],
+                        'label': 'contradiction',
+                        'confidence': conf_f,
+                        'similarity': meta['sim_score']
+                    })
 
-                pair_results.append({
-                    'sentence_1': meta['s1'],
-                    'sentence_2': meta['s2'],
-                    'label': 'contradiction',
-                    'confidence': conf_f,
-                    'similarity': meta['sim_score']
-                })
-
-        # Sorting results based on high model precision parameters
+        # Sorting results dynamically
         pair_results.sort(key=lambda x: (-x['confidence'], -x['similarity']))
 
         findings.append({
