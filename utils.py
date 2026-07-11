@@ -126,6 +126,8 @@ def are_same_topic(sim_model: SentenceTransformer, s1: str, s2: str, threshold: 
 
 # ─── Main Analysis Engine ─────────────────────────────────────────────────────
 
+# ─── Main Analysis Engine ─────────────────────────────────────────────────────
+
 def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, articles: list) -> list:
     parsed = []
     for art in articles:
@@ -142,8 +144,8 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
         for s1 in art_i['sentences']:
             for s2 in art_j['sentences']:
 
-                # Step 1: Broad Topic Match
-                if not are_same_topic(sim_model, s1, s2):
+                # Step 1: Broad Topic Match (Buhat loose threshold just to drop complete garbage)
+                if not are_same_topic(sim_model, s1, s2, threshold=0.25):
                     continue
 
                 # Step 2: AI's First Impression
@@ -153,33 +155,37 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
                 nums1 = extract_numbers_general(s1)
                 nums2 = extract_numbers_general(s2)
 
-                # 🧠 THE LOGICAL GUARDRAIL 🧠
+                # 🧠 THE DOUBLE GUARDRAIL (Apples vs Oranges Fix) 🧠
                 if nums1 and nums2:
-                    # Numbers ko 999 kardo taake model fair compare kare
+                    # Numbers ko 999 kardo
                     s1_norm = normalize_numbers_for_nli(s1)
                     s2_norm = normalize_numbers_for_nli(s2)
                     norm_label, _ = classify_pair(nli_model, s1_norm, s2_norm)
 
+                    # Model ne contradiction bola hai, ab hum test karenge ke context same tha ya nahi
                     if label == 'contradiction':
-                        # Agar model ne pehle Contradiction bola, 
-                        # par numbers same hone (999) ke baad usne Neutral keh diya:
-                        # Iska matlab sentences totally different topics pe the (Killed vs Displaced)!
-                        if norm_label == 'neutral':
+                        # Semantic Check: Kya numbers hatane ke baad sentences ek hi metric (e.g., deaths) ki baat kar rahe hain?
+                        emb_n1 = sim_model.encode(s1_norm, convert_to_tensor=True)
+                        emb_n2 = sim_model.encode(s2_norm, convert_to_tensor=True)
+                        norm_sim = float(util.cos_sim(emb_n1, emb_n2))
+
+                        # Agar masked sentences ka structure alag hai (< 0.45) e.g., Deaths vs Dollars
+                        # Toh ye actual contradiction nahi hai, isko neutral kardo!
+                        if norm_label == 'neutral' or norm_sim < 0.45:
                             label = 'neutral'
                             conf = 1.0 
                             
                     elif label in ['entailment', 'neutral']:
-                        # Agar sentences structuraly exact same baaten kar rahe hain (Entailment),
-                        # Toh ab hum math calculation se check karenge ke figures me contradiction to nahi.
+                        # Agar sentences exactly same baat kar rahe hain, bas numbers alag hain
                         if norm_label == 'entailment':
                             num_label, num_conf = detect_numerical_contradiction(nums1, nums2)
                             if num_label == 'contradiction':
                                 label = 'contradiction'
                                 conf = num_conf
 
-                # Step 4: Filter Output
+                # Step 4: Output Filtering
                 if label == 'neutral':
-                    continue  # Ignore neutral pairs so the output is clean
+                    continue  
 
                 pair_results.append({
                     'sentence_1': s1,
@@ -191,10 +197,13 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
         # Sort Results (Contradictions on top)
         pair_results.sort(key=lambda x: (x['label'] != 'contradiction', -x['confidence']))
 
+        # Agar result same source sentences ke beech me bhi contradiction bana raha tha, hum usko already pairs combination se handle kar chuke.
         findings.append({
             'source_1': art_i['source'],
             'source_2': art_j['source'],
-            'results':  pair_results[:8] # Clean Top 8 most confident results
+            'results':  pair_results[:8]
         })
 
     return findings
+
+ 
