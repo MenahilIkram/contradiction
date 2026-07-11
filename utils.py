@@ -45,6 +45,37 @@ def extract_sentences(text: str, max_sentences: int = 100) -> list:
     return unique_sentences[:max_sentences]
 
 
+# ─── Universal Token Overlap Filter (No Hardcoding) ───────────────────────────
+
+def get_clean_keywords(sentence: str) -> set:
+    """Useless grammar words nikal kar meaningful continuous words dhoondta hai."""
+    stop_words = {
+        'the', 'a', 'an', 'and', 'but', 'if', 'or', 'because', 'as', 'until', 'while',
+        'of', 'at', 'by', 'for', 'with', 'about', 'between', 'into', 'through', 'is', 'are',
+        'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out',
+        'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'was',
+        'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'were',
+        'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
+        's', 't', 'can', 'will', 'just', 'should', 'now', 'by', 'due', 'releasing', 'experienced'
+    }
+    words = re.findall(r'\b[a-zA-Z]{3,}\b', sentence.lower())
+    return {w for w in words if w not in stop_words}
+
+def compute_token_overlap(s1: str, s2: str) -> float:
+    """Dono sentences ke beech core vocabulary overlap ratio calculate karta hai."""
+    tokens1 = get_clean_keywords(s1)
+    tokens2 = get_clean_keywords(s2)
+    
+    if not tokens1 or not tokens2:
+        return 0.0
+    
+    intersection = tokens1.intersection(tokens2)
+    union = tokens1.union(tokens2)
+    
+    # Jaccard index similarity logic
+    return len(intersection) / len(union)
+
+
 # ─── Main Analysis Engine ─────────────────────────────────────────────────────
 
 def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, articles: list) -> list:
@@ -77,8 +108,8 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             for idx_j, s2 in enumerate(art_j['sentences']):
                 sim_score = float(cosine_scores[idx_i][idx_j])
 
-                # Perfect floor of 0.32 to capture complex alignments seamlessly
-                if sim_score < 0.32:
+                # Relaxed threshold so everything passes to token checking phase
+                if sim_score < 0.28:
                     continue
                 
                 pairs_forward.append((s1, s2))
@@ -100,48 +131,40 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             meta = metadata_pairs[idx]
 
             if label_f == 'contradiction' and conf_f > 0.70:
+                # Calculate dynamic overlap index
+                overlap_ratio = compute_token_overlap(meta['s1'], meta['s2'])
+                
                 candidate_pairs.append({
                     's1': meta['s1'],
                     's2': meta['s2'],
                     'confidence': conf_f,
-                    'similarity': meta['sim_score']
+                    'similarity': meta['sim_score'],
+                    'overlap': overlap_ratio
                 })
 
-        # Sort all findings globally by confidence
+        # Global priority sorting based on high model precision parameters
         candidate_pairs.sort(key=lambda x: (-x['confidence'], -x['similarity']))
 
-        # 🔥 SMART STRUCTURAL DEDUPLICATION FILTER (No Over-Clipping)
-        seen_pair_signatures = set()
-        
+        # 🔥 PURE MATHEMATICAL CLUSTER FILTER (Zero Hardcoding)
+        used_s1 = set()
+        used_s2 = set()
+
         for cand in candidate_pairs:
             s1_clean = cand['s1'].strip().lower()
             s2_clean = cand['s2'].strip().lower()
 
-            # Exact tuple matching pattern verification
-            pair_signature = (s1_clean, s2_clean)
-            reverse_signature = (s2_clean, s1_clean)
-
-            if pair_signature in seen_pair_signatures or reverse_signature in seen_pair_signatures:
+            # 🛡️ THE OVERLAP DEVIATION GUARD:
+            # Agar dono sentences mein absolute cross-matching ho rahi hai (overlap < 4%),
+            # par embedding high hai, toh yeh mismatch cluster hai. Isko filter out karein.
+            # Lekin agar overlap range 5% se upar hai ya direct polar links hain, toh allow karein.
+            if cand['overlap'] < 0.05 and cand['confidence'] < 0.999:
                 continue
 
-            # 💡 THE ADVANCED JACCARD OVERLAP GUARD:
-            # Agar hum is pair ko pehle se add huye kisi card se compare karein aur unke semantics badal rahe hon,
-            # toh use match hone do. Lekin agar same concept alag tarike se overlap ho raha ho (like 85% confidence mismatch),
-            # toh lower-ranked duplicate ko bypass kar do.
-            is_cross_topic_duplicate = False
-            for existing in pair_results:
-                # Agar pehle se added kisi result ka sentence_1 ya sentence_2 match ho raha hai aur confidence kam hai:
-                if existing['sentence_1'] == cand['s1'] or existing['sentence_2'] == cand['s2']:
-                    # Weak thresholds like 88% range combinations ko drop karo, par clean 100% discrete blocks ko allow karo
-                    if cand['confidence'] < 0.95 and cand['similarity'] < existing['similarity']:
-                        is_cross_topic_duplicate = True
-                        break
-
-            if is_cross_topic_duplicate:
+            if s1_clean in used_s1 and s2_clean in used_s2:
                 continue
 
-            # Lock the pair combinations
-            seen_pair_signatures.add(pair_signature)
+            used_s1.add(s1_clean)
+            used_s2.add(s2_clean)
 
             pair_results.append({
                 'sentence_1': cand['s1'],
@@ -156,7 +179,7 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
     findings.append({
         'source_1': art_i['source'],
         'source_2': art_j['source'],
-        'results': pair_results[:10]
+        'results': pair_results[:8]
     })
 
     return findings
