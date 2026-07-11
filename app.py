@@ -4,7 +4,6 @@ from utils import load_model, load_similarity_model, analyze_articles
 # ─── Page Configuration ───────────────────────────────────────────────────────
 st.set_page_config(page_title="AI Contradiction Detector", page_icon="🔍", layout="wide")
 
-# 🔥 PYTHON 3.14 BUG FIX: Streamlit Cloud par st.markdown crash se bachne ke liye st.html use kiya hai
 st.html("""
     <style>
     .reportview-container { background: #f5f7f8; }
@@ -65,7 +64,6 @@ if st.sidebar.button("🚀 Analyze Documents", use_container_width=True):
     if not file1 or not file2:
         st.warning("⚠️ Please upload both Article 1 and Article 2 before processing!")
     else:
-        # File 1 parsing logic based on extension
         if file1.name.endswith('.pdf'):
             text1 = read_pdf(file1)
         elif file1.name.endswith('.docx'):
@@ -73,7 +71,6 @@ if st.sidebar.button("🚀 Analyze Documents", use_container_width=True):
         else:
             text1 = read_txt(file1)
 
-        # File 2 parsing logic based on extension
         if file2.name.endswith('.pdf'):
             text2 = read_pdf(file2)
         elif file2.name.endswith('.docx'):
@@ -93,13 +90,26 @@ if st.sidebar.button("🚀 Analyze Documents", use_container_width=True):
             st.success("✅ Document Analysis Complete!")
             
             for finding in findings:
-                st.subheader(f"🗞️ {finding['source_1']}  vs  {finding['source_2']}  —  {len(finding['results'])} contradiction(s)")
+                # 🔥 FRONTEND DUPLICATE FILTER
+                # Ek set banayein taake rendered pairs ko track kiya ja sake
+                seen_pairs = set()
+                clean_results = []
                 
-                if not finding['results']:
+                for res in finding['results']:
+                    # Normalize text checking pattern
+                    pair_key = (res['sentence_1'].strip().lower(), res['sentence_2'].strip().lower())
+                    reverse_key = (res['sentence_2'].strip().lower(), res['sentence_1'].strip().lower())
+                    
+                    if pair_key not in seen_pairs and reverse_key not in seen_pairs:
+                        seen_pairs.add(pair_key)
+                        clean_results.append(res)
+                
+                st.subheader(f"🗞️ {finding['source_1']}  vs  {finding['source_2']}  —  {len(clean_results)} unique contradiction(s)")
+                
+                if not clean_results:
                     st.info("🎉 Exceptional Consistency: No contradictions detected across these documents!")
                 else:
-                    for res in finding['results']:
-                        # Card rendering optimized with dynamic HTML handling
+                    for res in clean_results:
                         st.html(f"""
                             <div class="card">
                                 <div class="source-tag">📄 {finding['source_1']}</div>
