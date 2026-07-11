@@ -75,66 +75,63 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
         if art_i['embeddings'] is None or art_j['embeddings'] is None:
             continue
 
-        # Cosine similarity matrix mapping
         cosine_scores = util.cos_sim(art_i['embeddings'], art_j['embeddings'])
         
-        pairs_to_predict = []
+        pairs_forward = []  # Direction 1: (s1, s2)
+        pairs_backward = [] # Direction 2: (s2, s1) -> Cross Verification
         metadata_pairs = []
 
         for idx_i, s1 in enumerate(art_i['sentences']):
             for idx_j, s2 in enumerate(art_j['sentences']):
                 sim_score = float(cosine_scores[idx_i][idx_j])
 
-                # 🛡️ THE PRECISION FILTER (0.42 is perfect for MPNET)
-                # MPNET models embedding depth zyada hoti hai, isliye 0.42 standard cutoff hai.
+                # MPNET ke liye 0.42 threshold completely dynamic aur perfect hai
                 if sim_score < 0.42:
                     continue
                 
-                pairs_to_predict.append((s1, s2))
+                pairs_forward.append((s1, s2))
+                pairs_backward.append((s2, s1))
                 metadata_pairs.append({'s1': s1, 's2': s2, 'sim_score': sim_score})
 
-        # Agar koi common context sentence nahi mila toh cycle skip karein
-        if not pairs_to_predict:
+        if not pairs_forward:
             continue
 
-        # High-Speed Batch Inference
-        raw_scores = nli_model.predict(pairs_to_predict, batch_size=16, show_progress_bar=False)
+        # Dono directions mein ek saath batch process karein (Speed par farq nahi parega)
+        raw_scores_f = nli_model.predict(pairs_forward, batch_size=16, show_progress_bar=False)
+        raw_scores_b = nli_model.predict(pairs_backward, batch_size=16, show_progress_bar=False)
         
-        for idx, score in enumerate(raw_scores):
-            probs = F.softmax(torch.tensor(score), dim=0)
-            pred_idx = int(probs.argmax())
-            conf = float(probs[pred_idx])
-            label = LABEL_MAP.get(pred_idx, "neutral")
-            meta = metadata_pairs[idx]
-            sim_score = meta['sim_score']
+        for idx in range(len(metadata_pairs)):
+            # Forward Direction Analysis
+            probs_f = F.softmax(torch.tensor(raw_scores_f[idx]), dim=0)
+            pred_idx_f = int(probs_f.argmax())
+            conf_f = float(probs_f[pred_idx_f])
+            label_f = LABEL_MAP.get(pred_idx_f, "neutral")
 
-            # 🛡️ DYNAMIC CONFIDENCE CALIBRATION INTEGRATED 🛡️
-            is_valid = False
-            if label == 'contradiction':
-                # Rule 1: Same exact topic/metric pe strong match hai, accept normal confidence (>0.75)
-                if sim_score >= 0.52 and conf > 0.75:
-                    is_valid = True
-                # Rule 2: Borderline semantic connection hai (jaise narrative shift), demand extreme confidence (>=0.90)
-                elif sim_score >= 0.42 and conf >= 0.90:
-                    is_valid = True
+            # Backward Direction Analysis
+            probs_b = F.softmax(torch.tensor(raw_scores_b[idx]), dim=0)
+            pred_idx_b = int(probs_b.argmax())
+            label_b = LABEL_MAP.get(pred_idx_b, "neutral")
 
-            # Agar dynamic rules criteria cross ho jaye, toh entry save karo
-            if is_valid:
+            # 🔥 DYNAMIC CROSS-VERIFICATION CONSTRAINT
+            # Sirf tab accept hoga jab DONO directions 'contradiction' agree karein!
+            if label_f == 'contradiction' and label_b == 'contradiction' and conf_f > 0.75:
+                meta = metadata_pairs[idx]
                 pair_results.append({
                     'sentence_1': meta['s1'],
                     'sentence_2': meta['s2'],
-                    'label': label,
-                    'confidence': conf,
-                    'similarity': sim_score
+                    'label': 'contradiction',
+                    'confidence': conf_f,
+                    'similarity': meta['sim_score']
                 })
 
-        # Sort results based on top contradiction confidence and similarity
+        # Sorting and filtering top matches
         pair_results.sort(key=lambda x: (-x['confidence'], -x['similarity']))
 
         findings.append({
             'source_1': art_i['source'],
             'source_2': art_j['source'],
-            'results': pair_results[:8] # Top 8 highly accurate contradictions
+            'results': pair_results[:8]
         })
 
     return findings
+
