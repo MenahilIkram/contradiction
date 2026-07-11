@@ -103,7 +103,7 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             label_b = LABEL_MAP.get(pred_idx_b, "neutral")
 
             if label_f == 'contradiction' and label_b == 'contradiction':
-                if conf_f >= 0.95 and conf_b >= 0.95:
+                if conf_f >= 0.90 and conf_b >= 0.90:
                     meta = metadata_pairs[idx]
                     pair_results.append({
                         'sentence_1': meta['s1'],
