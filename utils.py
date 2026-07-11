@@ -77,8 +77,8 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             for idx_j, s2 in enumerate(art_j['sentences']):
                 sim_score = float(cosine_scores[idx_i][idx_j])
 
-                # Similarity floor relaxed back to 0.30 so we never miss complex rewording
-                if sim_score < 0.30:
+                # Perfect floor of 0.32 to capture complex alignments seamlessly
+                if sim_score < 0.32:
                     continue
                 
                 pairs_forward.append((s1, s2))
@@ -89,7 +89,6 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
 
         raw_scores_f = nli_model.predict(pairs_forward, batch_size=64, show_progress_bar=False)
         
-        # Temporary full findings list for sorting before deduplication
         candidate_pairs = []
         
         for idx in range(len(metadata_pairs)):
@@ -100,7 +99,6 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
 
             meta = metadata_pairs[idx]
 
-            # Collect all logical contradictions with a loose threshold
             if label_f == 'contradiction' and conf_f > 0.70:
                 candidate_pairs.append({
                     's1': meta['s1'],
@@ -109,25 +107,41 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
                     'similarity': meta['sim_score']
                 })
 
-        # 🔥 STEP 2: Sort candidates by highest confidence first so best matches take priority
+        # Sort all findings globally by confidence
         candidate_pairs.sort(key=lambda x: (-x['confidence'], -x['similarity']))
 
-        # 🔥 STEP 3: Strict Element-Level Deduplication System
-        # Track locked down independent strings
-        used_s1 = set()
-        used_s2 = set()
-
+        # 🔥 SMART STRUCTURAL DEDUPLICATION FILTER (No Over-Clipping)
+        seen_pair_signatures = set()
+        
         for cand in candidate_pairs:
             s1_clean = cand['s1'].strip().lower()
             s2_clean = cand['s2'].strip().lower()
 
-            # If either individual sentence has already been matched to a better contradiction, skip it
-            if s1_clean in used_s1 or s2_clean in used_s2:
+            # Exact tuple matching pattern verification
+            pair_signature = (s1_clean, s2_clean)
+            reverse_signature = (s2_clean, s1_clean)
+
+            if pair_signature in seen_pair_signatures or reverse_signature in seen_pair_signatures:
                 continue
 
-            # Lock the elements down
-            used_s1.add(s1_clean)
-            used_s2.add(s2_clean)
+            # 💡 THE ADVANCED JACCARD OVERLAP GUARD:
+            # Agar hum is pair ko pehle se add huye kisi card se compare karein aur unke semantics badal rahe hon,
+            # toh use match hone do. Lekin agar same concept alag tarike se overlap ho raha ho (like 85% confidence mismatch),
+            # toh lower-ranked duplicate ko bypass kar do.
+            is_cross_topic_duplicate = False
+            for existing in pair_results:
+                # Agar pehle se added kisi result ka sentence_1 ya sentence_2 match ho raha hai aur confidence kam hai:
+                if existing['sentence_1'] == cand['s1'] or existing['sentence_2'] == cand['s2']:
+                    # Weak thresholds like 88% range combinations ko drop karo, par clean 100% discrete blocks ko allow karo
+                    if cand['confidence'] < 0.95 and cand['similarity'] < existing['similarity']:
+                        is_cross_topic_duplicate = True
+                        break
+
+            if is_cross_topic_duplicate:
+                continue
+
+            # Lock the pair combinations
+            seen_pair_signatures.add(pair_signature)
 
             pair_results.append({
                 'sentence_1': cand['s1'],
@@ -137,13 +151,12 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
                 'similarity': cand['similarity']
             })
 
-    # Sort final results for clean visualization
     pair_results.sort(key=lambda x: (-x['confidence'], -x['similarity']))
 
     findings.append({
         'source_1': art_i['source'],
         'source_2': art_j['source'],
-        'results': pair_results[:8] # Maximum top relevant unique findings displayed
+        'results': pair_results[:10]
     })
 
     return findings
