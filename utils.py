@@ -15,10 +15,7 @@ def load_model():
 
 @st.cache_resource(show_spinner=False)
 def load_similarity_model():
-    """
-    Sentence similarity model — same topic check karta hai.
-    Alag topic hain to NLI call hi nahi karte — false positives avoid.
-    """
+    """Sentence similarity model — same topic check karta hai."""
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 
@@ -47,9 +44,6 @@ def clean_text(text: str) -> str:
 # ─── Factual Check ────────────────────────────────────────────────────────────
 
 def is_factual(sentence: str) -> bool:
-    """
-    Sentence mein factual claim hai ya nahi.
-    """
     factual_patterns = [
         r'\d+',
         r'\d+\.?\d*\s?%',
@@ -74,9 +68,6 @@ def is_factual(sentence: str) -> bool:
 # ─── Vague Check ─────────────────────────────────────────────────────────────
 
 def is_too_vague(sentence: str) -> bool:
-    """
-    Useless sentences filter karo.
-    """
     if len(sentence.split()) < 5:
         return True
 
@@ -95,9 +86,6 @@ def is_too_vague(sentence: str) -> bool:
 # ─── Duplicate Removal ───────────────────────────────────────────────────────
 
 def remove_duplicates(sentences: list, threshold: float = 0.85) -> list:
-    """
-    Similar sentences remove karo using Jaccard similarity.
-    """
     unique = []
     for sent in sentences:
         words_new = set(sent.lower().split())
@@ -118,9 +106,6 @@ def remove_duplicates(sentences: list, threshold: float = 0.85) -> list:
 # ─── Sentence Scoring ────────────────────────────────────────────────────────
 
 def score_sentence(sentence: str) -> int:
-    """
-    Importance score.
-    """
     score = 0
     s = sentence.lower()
     if re.search(r'\b(killed|died|dead|deaths|casualties|injured)\b', s):
@@ -138,12 +123,7 @@ def score_sentence(sentence: str) -> int:
 
 # ─── Sentence Extraction ─────────────────────────────────────────────────────
 
-def extract_sentences(text: str,
-                      max_factual: int = 10,
-                      max_other: int = 10) -> list:
-    """
-    Article se top sentences nikalo. Caps badha diye taake koi important claim miss na ho.
-    """
+def extract_sentences(text: str, max_factual: int = 8, max_other: int = 6) -> list:
     raw       = re.split(r'(?<=[.!?])\s+', text)
     sentences = [clean_text(s) for s in raw if clean_text(s)]
     sentences = [s for s in sentences if not is_too_vague(s)]
@@ -160,86 +140,33 @@ def extract_sentences(text: str,
 
 # ─── Topic Similarity Check ───────────────────────────────────────────────────
 
-def are_same_topic(sim_model: SentenceTransformer,
-                   s1: str, s2: str,
-                   threshold: float = 0.35) -> bool:
-    """
-    Cosine similarity check. Threshold thoda kam (0.35) kiya taake core topics miss na hon.
-    """
+def are_same_topic(sim_model: SentenceTransformer, s1: str, s2: str, threshold: float = 0.40) -> bool:
     emb1       = sim_model.encode(s1, convert_to_tensor=True)
     emb2       = sim_model.encode(s2, convert_to_tensor=True)
     similarity = float(util.cos_sim(emb1, emb2))
     return similarity >= threshold
 
 
-# ─── Numerical Contradiction Detector ────────────────────────────────────────
-
-STOPWORDS = {
-    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
-    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
-    'could', 'should', 'may', 'might', 'shall', 'can', 'to', 'of',
-    'in', 'on', 'at', 'by', 'for', 'with', 'about', 'as', 'into',
-    'through', 'during', 'from', 'up', 'down', 'out', 'and', 'or',
-    'but', 'not', 'no', 'so', 'yet', 'both', 'either', 'that',
-    'this', 'these', 'those', 'it', 'its', 'than', 'then', 'their',
-    'they', 'them', 'he', 'she', 'we', 'us', 'our', 'also', 'just',
-    'more', 'most', 'other', 'some', 'such', 'only', 'own', 'same',
-    'according', 'per', 'across', 'after', 'before', 'between',
-    'each', 'further', 'here', 'how', 'i', 'me', 'my', 'over',
-    'very', 'well', 'what', 'when', 'where', 'which', 'while',
-    'who', 'whom', 'why', 'your', 'all', 'any', 'reported', 'said', 
-    'noted', 'stated', 'confirmed', 'launched', 'seeking', 'including', 
-    'around', 'approximately', 'nearly', 'least', 'total', 'related', 
-    'due', 'continued', 'estimated',
-    # Naye unit words taake inki wajah se false context matching na ho
-    'dollars', 'dollar', 'million', 'billion', 'thousand', 'percent', 
-    'percentage', 'people', 'country', 'provinces', 'districts', 'regions'
-}
-
-
-def extract_context_words(sentence: str) -> set:
-    words = re.sub(r'[^a-zA-Z\s]', '', sentence.lower()).split()
-    content = {w for w in words if w not in STOPWORDS and len(w) > 2}
-    return content
-
-
-def have_common_context(s1: str, s2: str, min_common: int = 1) -> bool:
-    words1 = extract_context_words(s1)
-    words2 = extract_context_words(s2)
-
-    exact_common = words1 & words2
-    if len(exact_common) >= min_common:
-        return True
-
-    for w1 in words1:
-        for w2 in words2:
-            if len(w1) >= 4 and len(w2) >= 4:
-                if w1.startswith(w2[:4]) or w2.startswith(w1[:4]):
-                    return True
-    return False
-
+# ─── Smart Context & Categories ──────────────────────────────────────────────
 
 def get_numerical_category(sentence: str) -> str:
-    """
-    Sentence ko metric-specific category mein classification karta hai.
-    Sirf saheeh category ke sentences hi aapas mein compare honge.
-    """
+    """Sentence ke numerical context ko identify karta hai taake galat comparisons na hon."""
     s = sentence.lower()
     
-    # 1. Casualties (Deaths/Injuries)
+    # 1. Casualties (Deaths)
     if any(w in s for w in ['killed', 'died', 'dead', 'deaths', 'casualties', 'death toll', 'toll']):
         return 'casualty'
         
-    # 2. Economic / Monetary Loss / Aid Appeal
-    if any(w in s for w in ['dollar', '$', '£', '€', '₹', 'financial', 'economic', 'losses', 'damage cost', 'appeal']):
+    # 2. Economic / Money Loss
+    if any(w in s for w in ['dollar', 'dollars', '$', 'financial', 'economic', 'losses', 'damage cost', 'appeal']):
         return 'economic'
         
-    # 3. Infrastructure / Houses Destroyed
-    if any(w in s for w in ['residential', 'structures', 'buildings', 'houses', 'homes']) and not any(w in s for w in ['displaced', 'evacuated']):
+    # 3. Infrastructure / Houses
+    if any(w in s for w in ['houses', 'homes', 'residential', 'structures', 'buildings', 'property damage']):
         return 'infrastructure'
         
-    # 4. Displaced / Affected Population
-    if any(w in s for w in ['displaced', 'affected', 'evacuations', 'evacuated', 'homeless', 'citizens', 'humanitarian']):
+    # 4. Displaced / Affected People
+    if any(w in s for w in ['displaced', 'affected', 'evacuations', 'evacuated', 'citizens', 'people', 'humanitarian']):
         return 'population_affected'
         
     return 'other'
@@ -247,54 +174,31 @@ def get_numerical_category(sentence: str) -> str:
 
 def extract_numbers_general(text: str) -> list:
     text = text.lower()
-    
-    # Years (e.g., 2022, 1999) ko filter out karo taake main figures kharab na hon
+    # Years filter out karo (e.g. 2022)
     text = re.sub(r'\b(in\s+)?(19|20)\d{2}\b', ' ', text)
     
     numbers = []
-
-    # Scale conversions
     for match in re.finditer(r'(\d+\.?\d*)\s*billion', text):
         numbers.append(float(match.group(1)) * 1_000_000_000)
-
     for match in re.finditer(r'(\d+\.?\d*)\s*million', text):
         numbers.append(float(match.group(1)) * 1_000_000)
-
     for match in re.finditer(r'(\d+\.?\d*)\s*thousand', text):
         numbers.append(float(match.group(1)) * 1_000)
 
-    # Commas remove karo (1,700 -> 1700)
+    # Commas hatayein
     text = re.sub(r'\b(\d{1,3})(?:,\d{3})+\b', lambda m: m.group(0).replace(',', ''), text)
 
-    # Baki plain numbers aur decimals
     for match in re.finditer(r'\b(\d+\.?\d*)\b', text):
         try:
             val = float(match.group(1))
-            if val >= 10:
+            if val >= 10:  # Chote numbers ignore
                 numbers.append(val)
         except ValueError:
             continue
-
     return numbers
 
 
 def detect_numerical_contradiction(s1: str, s2: str) -> tuple:
-    """
-    Sirf apples-to-apples logic apply karta hai via smart grouping.
-    > 20% difference = CONTRADICTION.
-    < 20% difference = ENTAILMENT (Agreement).
-    """
-    cat1 = get_numerical_category(s1)
-    cat2 = get_numerical_category(s2)
-    
-    # Agar domain category different hai ya generic hai to filter out karo
-    if cat1 == 'other' or cat2 == 'other' or cat1 != cat2:
-        return None, 0.0
-
-    # Context verification double check karo
-    if not have_common_context(s1, s2):
-        return None, 0.0
-
     nums1 = extract_numbers_general(s1)
     nums2 = extract_numbers_general(s2)
 
@@ -307,21 +211,20 @@ def detect_numerical_contradiction(s1: str, s2: str) -> tuple:
     if n1 == 0 or n2 == 0:
         return None, 0.0
 
-    # Percentage farq calculate karein
     diff_pct = abs(n1 - n2) / max(n1, n2)
 
+    # 20% se zyada farq = Sach mein contradiction hai
     if diff_pct > 0.20:
         confidence = min(0.99, 0.65 + diff_pct)
         return 'contradiction', round(confidence, 2)
 
-    # Agar figures bohat close hain (e.g. 10B vs 10.5B) tou ye agreement hai!
+    # Agar farq kam hai to iska matlab figures agree kar rahe hain!
     return 'entailment', 0.85
 
 
 # ─── NLI Classification ──────────────────────────────────────────────────────
 
-def classify_pair(nli_model: CrossEncoder,
-                  sent1: str, sent2: str) -> tuple:
+def classify_pair(nli_model: CrossEncoder, sent1: str, sent2: str) -> tuple:
     raw_scores = nli_model.predict([(sent1, sent2)])[0]
     probs      = F.softmax(torch.tensor(raw_scores), dim=0)
     pred_idx   = int(probs.argmax())
@@ -331,9 +234,7 @@ def classify_pair(nli_model: CrossEncoder,
 
 # ─── Main Analysis ───────────────────────────────────────────────────────────
 
-def analyze_articles(nli_model: CrossEncoder,
-                     sim_model: SentenceTransformer,
-                     articles: list) -> list:
+def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, articles: list) -> list:
     parsed = []
     for art in articles:
         sents = extract_sentences(art['text'])
@@ -344,30 +245,42 @@ def analyze_articles(nli_model: CrossEncoder,
     for i, j in combinations(range(len(parsed)), 2):
         art_i = parsed[i]
         art_j = parsed[j]
-
         pair_results = []
 
         for s1 in art_i['sentences']:
             for s2 in art_j['sentences']:
 
-                # Step 3: Topic similarity check
+                # Step 1: Topic Similarity
                 if not are_same_topic(sim_model, s1, s2):
                     continue
 
-                # Step 4: Linguistic NLI prediction
+                # Step 2: Base NLI Prediction
                 label, conf = classify_pair(nli_model, s1, s2)
 
-                # Step 5: Advanced Numerical override
-                num_label, num_conf = detect_numerical_contradiction(s1, s2)
-                if num_label == 'contradiction':
-                    label = 'contradiction'
-                    conf  = num_conf
-                elif num_label == 'entailment' and label == 'neutral':
-                    label = 'entailment'
-                    conf  = num_conf
+                # Step 3: Categories & Number Extraction
+                cat1 = get_numerical_category(s1)
+                cat2 = get_numerical_category(s2)
+                has_num1 = len(extract_numbers_general(s1)) > 0
+                has_num2 = len(extract_numbers_general(s2)) > 0
 
-                # Noise control: Low confidence neutral pairs ko skip karo
-                if label == 'neutral' and conf < 0.70:
+                # ── GUARDRAILS ──
+                
+                # Guardrail A: Agar dono mein numbers hain par metrics alag hain (e.g., deaths vs displaced)
+                # To NLI ka 'contradiction' claim bilkul false positive hai. Force it to Neutral!
+                if has_num1 and has_num2 and cat1 != cat2:
+                    if label == 'contradiction':
+                        label = 'neutral'
+                        conf = 1.0
+
+                # Guardrail B: Agar dono SAME metric par baat kar rahe hain, to rule-based logic chalao
+                elif cat1 != 'other' and cat1 == cat2:
+                    num_label, num_conf = detect_numerical_contradiction(s1, s2)
+                    if num_label is not None:
+                        label = num_label
+                        conf = num_conf
+
+                # Faltu noise clean karne ke liye low confidence neutral filter out karein
+                if label == 'neutral' and conf < 0.75:
                     continue
 
                 pair_results.append({
@@ -377,10 +290,8 @@ def analyze_articles(nli_model: CrossEncoder,
                     'confidence': conf
                 })
 
-        # Sorting strategy: Contradictions sabse pehle, phir high confidence
-        pair_results.sort(
-            key=lambda x: (x['label'] != 'contradiction', -x['confidence'])
-        )
+        # Sort: Contradictions sabse upar
+        pair_results.sort(key=lambda x: (x['label'] != 'contradiction', -x['confidence']))
 
         findings.append({
             'source_1': art_i['source'],
