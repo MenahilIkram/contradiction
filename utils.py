@@ -77,8 +77,6 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             for idx_j, s2 in enumerate(art_j['sentences']):
                 sim_score = float(cosine_scores[idx_i][idx_j])
 
-                # 🛡️ RELAXED SIMILARITY FILTER (0.30)
-                # Kuch numeric ya structured differences ki embedding distance thodi zyada hoti hai
                 if sim_score < 0.30:
                     continue
                 
@@ -88,8 +86,11 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
         if not pairs_forward:
             continue
 
-        # Large batch inference optimized for performance
         raw_scores_f = nli_model.predict(pairs_forward, batch_size=64, show_progress_bar=False)
+        
+        # 🛡️ BACKEND DEDUPLICATION METRIC TRACKERS
+        seen_sentences_1 = set()
+        seen_sentences_2 = set()
         
         for idx in range(len(metadata_pairs)):
             probs_f = F.softmax(torch.tensor(raw_scores_f[idx]), dim=0)
@@ -99,32 +100,33 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
 
             meta = metadata_pairs[idx]
 
-            # Broad boundary filter taake financial updates miss na hon
             if label_f == 'contradiction' and conf_f > 0.70:
+                s1_clean = meta['s1'].strip().lower()
+                s2_clean = meta['s2'].strip().lower()
                 
-                # 🔥 FIXED LOGIC: 'or' ko 'and' se replace kiya hai taake exact same pair double add na ho
-                is_duplicate = False
-                for existing in pair_results:
-                    if existing['sentence_1'] == meta['s1'] and existing['sentence_2'] == meta['s2']:
-                        is_duplicate = True
-                        break
+                # 🔥 STRICT ISOLATION FILTER: 
+                # Agar koi sentence pehle hi kisi contradiction card mein use ho chuka hai, 
+                # toh use doobara naye variations ke sath repeat nahi hone dena.
+                if s1_clean in seen_sentences_1 or s2_clean in seen_sentences_2 or s1_clean in seen_sentences_2 or s2_clean in seen_sentences_1:
+                    continue
                 
-                if not is_duplicate:
-                    pair_results.append({
-                        'sentence_1': meta['s1'],
-                        'sentence_2': meta['s2'],
-                        'label': 'contradiction',
-                        'confidence': conf_f,
-                        'similarity': meta['sim_score']
-                    })
+                seen_sentences_1.add(s1_clean)
+                seen_sentences_2.add(s2_clean)
 
-        # Sorting based on contradiction confidence
+                pair_results.append({
+                    'sentence_1': meta['s1'],
+                    'sentence_2': meta['s2'],
+                    'label': 'contradiction',
+                    'confidence': conf_f,
+                    'similarity': meta['sim_score']
+                })
+
         pair_results.sort(key=lambda x: (-x['confidence'], -x['similarity']))
 
         findings.append({
             'source_1': art_i['source'],
             'source_2': art_j['source'],
-            'results': pair_results[:12] # Expanded window to capture all valid items
+            'results': pair_results[:12]
         })
 
     return findings
