@@ -5,87 +5,255 @@ from itertools import combinations
 from sentence_transformers import CrossEncoder, SentenceTransformer, util
 import streamlit as st
 
+
 # ─── Model Loading ────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner=False)
 def load_model():
-    """HIGH ACCURACY SOTA NLI Model - DeBERTa-v3-base"""
+    """
+    NLI Model: cross-encoder/nli-deberta-v3-base
+    
+    MiniLM se kyun better:
+    - DeBERTa-v3 abhi NLI ka SOTA (State of the Art) model hai
+    - SNLI + MultiNLI + FEVER pe trained hai
+    - Disentangled attention mechanism use karta hai jo
+      word relationships zyada accurately capture karta hai
+    """
     return CrossEncoder('cross-encoder/nli-deberta-v3-base')
+
 
 @st.cache_resource(show_spinner=False)
 def load_similarity_model():
-    """HIGH ACCURACY Similarity Model - MPNET-base-v2"""
-    return SentenceTransformer('all-mpnet-base-v2') 
+    """
+    Similarity Model: all-mpnet-base-v2
+    
+    all-MiniLM se kyun better:
+    - MPNet (Masked and Permuted Pre-training) use karta hai
+    - Sentence similarity benchmarks pe consistently better scores
+    - Topic filtering ke liye zyada accurate embeddings
+    """
+    return SentenceTransformer('all-mpnet-base-v2')
 
 
-# ─── Config & Labels ──────────────────────────────────────────────────────────
+# ─── Labels ───────────────────────────────────────────────────────────────────
 
-LABEL_MAP = {0: "contradiction", 1: "entailment", 2: "neutral"}
+# DeBERTa model ka label order: [contradiction, entailment, neutral]
+LABEL_MAP   = {0: "contradiction", 1: "entailment", 2: "neutral"}
 LABEL_EMOJI = {"contradiction": "❌", "entailment": "✅", "neutral": "🤷"}
 LABEL_COLOR = {"contradiction": "#ff4b4b", "entailment": "#00c853", "neutral": "#888888"}
 
 
-# ─── Text Processing ──────────────────────────────────────────────────────────
+# ─── Text Cleaning ────────────────────────────────────────────────────────────
 
 def clean_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def extract_sentences(text: str, max_sentences: int = 100) -> list:
+
+# ─── Sentence Extraction ─────────────────────────────────────────────────────
+
+def extract_sentences(text: str, max_sentences: int = 30) -> list:
+    """
+    Article ko sentences mein split karo.
+    - 4 words se kam sentences skip karo (incomplete hote hain)
+    - Exact duplicates remove karo
+    """
     if not text:
         return []
-    raw = re.split(r'(?<=[.!?])\s+', text)
-    sentences = [clean_text(s) for s in raw if len(clean_text(s).split()) >= 4]
-    
-    unique_sentences = []
+    raw       = re.split(r'(?<=[.!?])\s+', text)
+    sentences = [clean_text(s) for s in raw
+                 if len(clean_text(s).split()) >= 4]
+
+    # Exact duplicates remove karo (order preserve karo)
+    unique = []
     for s in sentences:
-        if s not in unique_sentences:
-            unique_sentences.append(s)
-            
-    return unique_sentences[:max_sentences]
+        if s not in unique:
+            unique.append(s)
+
+    return unique[:max_sentences]
 
 
-# ─── Universal Token Overlap Filter (No Hardcoding) ───────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# TUMHARI CONTRIBUTION — Numerical Contradiction Detector
+# ═══════════════════════════════════════════════════════════════════════════════
+# NLI model (DeBERTa) language samajhta hai lekin exact numbers ka
+# fark nahi pakadta:
+# "1700 killed" vs "900 deaths" → NLI neutral bol deta hai
+# Ye rule-based module specifically numbers compare karta hai.
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def get_clean_keywords(sentence: str) -> set:
-    """Useless grammar words nikal kar meaningful continuous words dhoondta hai."""
-    stop_words = {
-        'the', 'a', 'an', 'and', 'but', 'if', 'or', 'because', 'as', 'until', 'while',
-        'of', 'at', 'by', 'for', 'with', 'about', 'between', 'into', 'through', 'is', 'are',
-        'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out',
-        'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there', 'was',
-        'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'were',
-        'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
-        's', 't', 'can', 'will', 'just', 'should', 'now', 'by', 'due', 'releasing', 'experienced'
-    }
-    words = re.findall(r'\b[a-zA-Z]{3,}\b', sentence.lower())
-    return {w for w in words if w not in stop_words}
+# Number type keywords — sentence mein number KISKA baare mein hai
+NUMBER_TYPES = {
+    'deaths': [
+        'killed', 'died', 'deaths', 'casualties',
+        'dead', 'toll', 'fatalities', 'perished'
+    ],
+    'people_affected': [
+        'displaced', 'evacuated', 'homeless',
+        'assistance', 'humanitarian', 'affected'
+    ],
+    'people_count': [
+        'citizens', 'residents', 'population',
+        'individuals', 'persons', 'people'
+    ],
+    'homes': [
+        'homes', 'houses', 'structures',
+        'buildings', 'residential', 'properties'
+    ],
+    'money': [
+        'billion', 'million', 'dollars', 'losses',
+        'damage', 'cost', 'financial', 'economic',
+        'rupees', 'euros', 'pounds'
+    ],
+    'percentage': [
+        'percent', '%', 'rate', 'ratio', 'proportion'
+    ],
+    'area': [
+        'area', 'land', 'territory', 'region',
+        'acre', 'hectare', 'km', 'kilometer'
+    ],
+}
 
-def compute_token_overlap(s1: str, s2: str) -> float:
-    """Dono sentences ke beech core vocabulary overlap ratio calculate karta hai."""
-    tokens1 = get_clean_keywords(s1)
-    tokens2 = get_clean_keywords(s2)
-    
-    if not tokens1 or not tokens2:
-        return 0.0
-    
-    intersection = tokens1.intersection(tokens2)
-    union = tokens1.union(tokens2)
-    
-    # Jaccard index similarity logic
-    return len(intersection) / len(union)
+
+def get_number_type(sentence: str) -> str:
+    """
+    Sentence mein number kis cheez ka hai identify karo.
+
+    Sirf same type ke numbers compare kiye jayenge:
+    "1700 killed" (deaths) vs "900 deaths" (deaths)   → COMPARE
+    "1700 killed" (deaths) vs "15M displaced" (people) → SKIP
+
+    Ye fix isliye zaroori tha kyunke pehle:
+    "1700 killed" vs "15M displaced" = 99% contradiction ← GALAT
+    Ab type check karne se ye false positive nahi aata.
+    """
+    s = sentence.lower()
+    for type_name, keywords in NUMBER_TYPES.items():
+        if any(kw in s for kw in keywords):
+            return type_name
+    return 'general'
 
 
-# ─── Main Analysis Engine ─────────────────────────────────────────────────────
+def extract_numbers(text: str) -> list:
+    """
+    Text se numbers nikalo — billion/million/thousand convert karo.
 
-def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, articles: list) -> list:
+    "30 billion" → 30,000,000,000
+    "15 million" → 15,000,000
+    "1,700"      → 1700
+    "6%"         → 6
+    """
+    text = text.lower()
+    numbers = []
+
+    for m in re.finditer(r'(\d+\.?\d*)\s*billion', text):
+        numbers.append(float(m.group(1)) * 1_000_000_000)
+
+    for m in re.finditer(r'(\d+\.?\d*)\s*million', text):
+        numbers.append(float(m.group(1)) * 1_000_000)
+
+    for m in re.finditer(r'(\d+\.?\d*)\s*thousand', text):
+        numbers.append(float(m.group(1)) * 1_000)
+
+    # Comma wale numbers: 1,700 → 1700
+    for m in re.finditer(r'\b(\d{1,3}(?:,\d{3})+)\b', text):
+        numbers.append(float(m.group(1).replace(',', '')))
+
+    # Plain numbers — sirf 5 se bade (year/age confusion avoid)
+    for m in re.finditer(r'\b(\d+\.?\d*)\b', text):
+        val = float(m.group(1))
+        if val >= 5:
+            numbers.append(val)
+
+    return numbers
+
+
+def detect_numerical_contradiction(s1: str, s2: str) -> tuple:
+    """
+    Numbers wali sentences mein contradiction detect karo.
+
+    Step 1: Type same hai? (deaths vs deaths, money vs money)
+            Alag type → return None (compare nahi karein)
+
+    Step 2: Numbers nikalo dono se
+
+    Step 3: Fark 20% se zyada?
+            Haan → CONTRADICTION
+            Nahi → ENTAILMENT (same figure roughly)
+
+    Threshold 20% kyun:
+    - Sources mein thodi rounding normal hai (1700 vs 1750)
+    - 20% se zyada = genuinely alag claim
+    - $10B vs $15B = 33% fark = CONTRADICTION
+    - $10B vs $10.5B = 5% fark = same figure
+    """
+    type1 = get_number_type(s1)
+    type2 = get_number_type(s2)
+
+    # Alag type = mat compare karo
+    if type1 != type2:
+        return None, 0.0
+
+    # 'general' type — too vague to compare
+    if type1 == 'general':
+        return None, 0.0
+
+    nums1 = extract_numbers(s1)
+    nums2 = extract_numbers(s2)
+
+    if not nums1 or not nums2:
+        return None, 0.0
+
+    n1 = max(nums1)
+    n2 = max(nums2)
+
+    if n1 == 0 or n2 == 0:
+        return None, 0.0
+
+    diff_pct = abs(n1 - n2) / max(n1, n2)
+
+    if diff_pct > 0.20:
+        # Jitna zyada fark, utni zyada confidence
+        # 20% fark → 0.75 conf, 80% fark → 0.99 conf
+        confidence = min(0.99, 0.55 + diff_pct)
+        return 'contradiction', round(confidence, 2)
+
+    return 'entailment', 0.75
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BASE CODE — Google AI (Gemini) se liya, bug fix kiya, numerical detector add kiya
+# Changes tumne kiye:
+# 1. findings.append loop ke andar move kiya (bug fix)
+# 2. Numerical detector integrate kiya as NLI fallback
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def analyze_articles(nli_model: CrossEncoder,
+                     sim_model: SentenceTransformer,
+                     articles: list) -> list:
+    """
+    Har article pair ke beech contradictions dhundta hai.
+
+    Pipeline:
+    1. Sentences extract karo
+    2. Embeddings compute karo (batch mein — fast)
+    3. Cosine similarity matrix — topic filter
+    4. Filtered pairs → DeBERTa NLI classify karo (batch)
+    5. NLI weak/neutral → Numerical detector try karo (tumhari contribution)
+    6. Confidence + overlap filter lagao
+    7. Results sort karke return karo
+    """
+
+    # Step 1 & 2: Extract + Embed
     parsed = []
     for art in articles:
-        sents = extract_sentences(art.get('text', ''))
-        embeddings = sim_model.encode(sents, convert_to_tensor=True) if sents else None
+        sents      = extract_sentences(art.get('text', ''))
+        embeddings = sim_model.encode(
+            sents, convert_to_tensor=True
+        ) if sents else None
         parsed.append({
-            'source': art.get('source', 'Unknown Source'), 
-            'sentences': sents,
+            'source':     art.get('source', 'Unknown'),
+            'sentences':  sents,
             'embeddings': embeddings
         })
 
@@ -99,87 +267,113 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
         if art_i['embeddings'] is None or art_j['embeddings'] is None:
             continue
 
-        cosine_scores = util.cos_sim(art_i['embeddings'], art_j['embeddings'])
-        
-        pairs_forward = []
-        metadata_pairs = []
+        # Step 3: Cosine similarity matrix — ek call mein sab pairs
+        cosine_scores = util.cos_sim(
+            art_i['embeddings'], art_j['embeddings']
+        )
+
+        pairs_to_classify = []
+        metadata          = []
 
         for idx_i, s1 in enumerate(art_i['sentences']):
             for idx_j, s2 in enumerate(art_j['sentences']):
                 sim_score = float(cosine_scores[idx_i][idx_j])
 
-                # Relaxed threshold so everything passes to token checking phase
+                # Topic filter: 0.28 se kam = bilkul alag topic
                 if sim_score < 0.28:
                     continue
-                
-                pairs_forward.append((s1, s2))
-                metadata_pairs.append({'s1': s1, 's2': s2, 'sim_score': sim_score})
 
-        if not pairs_forward:
-            continue
-
-        raw_scores_f = nli_model.predict(pairs_forward, batch_size=64, show_progress_bar=False)
-        
-        candidate_pairs = []
-        
-        for idx in range(len(metadata_pairs)):
-            probs_f = F.softmax(torch.tensor(raw_scores_f[idx]), dim=0)
-            pred_idx_f = int(probs_f.argmax())
-            conf_f = float(probs_f[pred_idx_f])
-            label_f = LABEL_MAP.get(pred_idx_f, "neutral")
-
-            meta = metadata_pairs[idx]
-
-            if label_f == 'contradiction' and conf_f > 0.70:
-                # Calculate dynamic overlap index
-                overlap_ratio = compute_token_overlap(meta['s1'], meta['s2'])
-                
-                candidate_pairs.append({
-                    's1': meta['s1'],
-                    's2': meta['s2'],
-                    'confidence': conf_f,
-                    'similarity': meta['sim_score'],
-                    'overlap': overlap_ratio
+                pairs_to_classify.append((s1, s2))
+                metadata.append({
+                    's1': s1, 's2': s2,
+                    'sim_score': sim_score
                 })
 
-        # Global priority sorting based on high model precision parameters
-        candidate_pairs.sort(key=lambda x: (-x['confidence'], -x['similarity']))
+        if not pairs_to_classify:
+            # Koi pair nahi mila → empty result
+            findings.append({
+                'source_1': art_i['source'],
+                'source_2': art_j['source'],
+                'results':  []
+            })
+            continue
 
-        # 🔥 PURE MATHEMATICAL CLUSTER FILTER (Zero Hardcoding)
+        # Step 4: Batch NLI classification — ek call mein sab
+        raw_scores = nli_model.predict(
+            pairs_to_classify,
+            batch_size=16,
+            show_progress_bar=False
+        )
+
+        candidates = []
+
+        for idx, meta in enumerate(metadata):
+            probs    = F.softmax(torch.tensor(raw_scores[idx]), dim=0)
+            pred_idx = int(probs.argmax())
+            conf     = float(probs[pred_idx])
+            label    = LABEL_MAP.get(pred_idx, 'neutral')
+
+            s1 = meta['s1']
+            s2 = meta['s2']
+
+            # Step 5: NLI weak/neutral → Numerical detector try karo
+            # (TUMHARI CONTRIBUTION)
+            # DeBERTa "1700 killed" vs "900 deaths" ko neutral bol deta hai
+            # Numerical detector same-type numbers ka fark check karta hai
+            if label in ('neutral', 'entailment') or conf < 0.70:
+                num_label, num_conf = detect_numerical_contradiction(s1, s2)
+                if num_label == 'contradiction':
+                    label = 'contradiction'
+                    conf  = num_conf
+
+            # Sirf confident contradictions rakho
+            if label != 'contradiction' or conf < 0.70:
+                continue
+
+            # Token overlap calculate karo
+            # Overlap < 5% aur conf < 99.9% = likely false positive
+            tokens1 = set(re.findall(r'\b[a-zA-Z]{3,}\b', s1.lower()))
+            tokens2 = set(re.findall(r'\b[a-zA-Z]{3,}\b', s2.lower()))
+            overlap = (len(tokens1 & tokens2) / len(tokens1 | tokens2)
+                       if tokens1 | tokens2 else 0.0)
+
+            if overlap < 0.05 and conf < 0.999:
+                continue
+
+            candidates.append({
+                'sentence_1': s1,
+                'sentence_2': s2,
+                'label':      'contradiction',
+                'confidence': conf,
+                'similarity': meta['sim_score'],
+                'overlap':    overlap
+            })
+
+        # Step 6: Sort by confidence
+        candidates.sort(key=lambda x: (-x['confidence'], -x['similarity']))
+
+        # Duplicate sentence filter — same sentence dobara nahi
         used_s1 = set()
         used_s2 = set()
 
-        for cand in candidate_pairs:
-            s1_clean = cand['s1'].strip().lower()
-            s2_clean = cand['s2'].strip().lower()
+        for cand in candidates:
+            s1_key = cand['sentence_1'].strip().lower()
+            s2_key = cand['sentence_2'].strip().lower()
 
-            # 🛡️ THE OVERLAP DEVIATION GUARD:
-            # Agar dono sentences mein absolute cross-matching ho rahi hai (overlap < 4%),
-            # par embedding high hai, toh yeh mismatch cluster hai. Isko filter out karein.
-            # Lekin agar overlap range 5% se upar hai ya direct polar links hain, toh allow karein.
-            if cand['overlap'] < 0.05 and cand['confidence'] < 0.999:
+            if s1_key in used_s1 and s2_key in used_s2:
                 continue
 
-            if s1_clean in used_s1 and s2_clean in used_s2:
-                continue
+            used_s1.add(s1_key)
+            used_s2.add(s2_key)
+            pair_results.append(cand)
 
-            used_s1.add(s1_clean)
-            used_s2.add(s2_clean)
-
-            pair_results.append({
-                'sentence_1': cand['s1'],
-                'sentence_2': cand['s2'],
-                'label': 'contradiction',
-                'confidence': cand['confidence'],
-                'similarity': cand['similarity']
-            })
-
-    pair_results.sort(key=lambda x: (-x['confidence'], -x['similarity']))
-
-    findings.append({
-        'source_1': art_i['source'],
-        'source_2': art_j['source'],
-        'results': pair_results[:25]
-    })
+        # Step 7: BUG FIX — findings.append loop KE ANDAR hona chahiye
+        # Google AI wale code mein ye loop ke bahar tha —
+        # sirf last pair ka result save hota tha
+        findings.append({
+            'source_1': art_i['source'],
+            'source_2': art_j['source'],
+            'results':  pair_results[:8]
+        })
 
     return findings
