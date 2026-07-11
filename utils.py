@@ -179,7 +179,7 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
     findings.append({
         'source_1': art_i['source'],
         'source_2': art_j['source'],
-        'results': pair_results[:8]
+        'results': pair_results[:25]
     })
 
     return findings
