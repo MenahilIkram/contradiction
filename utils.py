@@ -31,7 +31,7 @@ def clean_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def extract_sentences(text: str, max_sentences: int = 30) -> list:
+def extract_sentences(text: str, max_sentences: int = 100) -> list:
     if not text:
         return []
     raw = re.split(r'(?<=[.!?])\s+', text)
@@ -89,7 +89,7 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             continue
 
         # Single batch processing (Super Fast)
-        raw_scores_f = nli_model.predict(pairs_forward, batch_size=16, show_progress_bar=False)
+        raw_scores_f = nli_model.predict(pairs_forward, batch_size=64, show_progress_bar=False)
         
         for idx in range(len(metadata_pairs)):
             probs_f = F.softmax(torch.tensor(raw_scores_f[idx]), dim=0)
