@@ -77,10 +77,8 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             for idx_j, s2 in enumerate(art_j['sentences']):
                 sim_score = float(cosine_scores[idx_i][idx_j])
 
-                # 🛡️ THE GOLDILOCKS CALIBRATION (0.45)
-                # Yeh threshold ensure karta hai ke cross-topic cross matching (like Revenue vs Supply Chain) block ho jaye.
-                # Sirf wahi sentences pass honge jo actual mein SAME topic share karte hain.
-                if sim_score < 0.45:
+                # Similarity floor relaxed back to 0.30 so we never miss complex rewording
+                if sim_score < 0.30:
                     continue
                 
                 pairs_forward.append((s1, s2))
@@ -89,8 +87,10 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
         if not pairs_forward:
             continue
 
-        # Inference processing window optimized
         raw_scores_f = nli_model.predict(pairs_forward, batch_size=64, show_progress_bar=False)
+        
+        # Temporary full findings list for sorting before deduplication
+        candidate_pairs = []
         
         for idx in range(len(metadata_pairs)):
             probs_f = F.softmax(torch.tensor(raw_scores_f[idx]), dim=0)
@@ -100,32 +100,50 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
 
             meta = metadata_pairs[idx]
 
-            # Confidence threshold perfectly tuned to 0.85
-            if label_f == 'contradiction' and conf_f > 0.85:
-                
-                # Check for exact duplicate pairs
-                is_duplicate = False
-                for existing in pair_results:
-                    if existing['sentence_1'] == meta['s1'] and existing['sentence_2'] == meta['s2']:
-                        is_duplicate = True
-                        break
-                
-                if not is_duplicate:
-                    pair_results.append({
-                        'sentence_1': meta['s1'],
-                        'sentence_2': meta['s2'],
-                        'label': 'contradiction',
-                        'confidence': conf_f,
-                        'similarity': meta['sim_score']
-                    })
+            # Collect all logical contradictions with a loose threshold
+            if label_f == 'contradiction' and conf_f > 0.70:
+                candidate_pairs.append({
+                    's1': meta['s1'],
+                    's2': meta['s2'],
+                    'confidence': conf_f,
+                    'similarity': meta['sim_score']
+                })
 
-        # Sorting results dynamically
-        pair_results.sort(key=lambda x: (-x['confidence'], -x['similarity']))
+        # 🔥 STEP 2: Sort candidates by highest confidence first so best matches take priority
+        candidate_pairs.sort(key=lambda x: (-x['confidence'], -x['similarity']))
 
-        findings.append({
-            'source_1': art_i['source'],
-            'source_2': art_j['source'],
-            'results': pair_results[:12]
-        })
+        # 🔥 STEP 3: Strict Element-Level Deduplication System
+        # Track locked down independent strings
+        used_s1 = set()
+        used_s2 = set()
+
+        for cand in candidate_pairs:
+            s1_clean = cand['s1'].strip().lower()
+            s2_clean = cand['s2'].strip().lower()
+
+            # If either individual sentence has already been matched to a better contradiction, skip it
+            if s1_clean in used_s1 or s2_clean in used_s2:
+                continue
+
+            # Lock the elements down
+            used_s1.add(s1_clean)
+            used_s2.add(s2_clean)
+
+            pair_results.append({
+                'sentence_1': cand['s1'],
+                'sentence_2': cand['s2'],
+                'label': 'contradiction',
+                'confidence': cand['confidence'],
+                'similarity': cand['similarity']
+            })
+
+    # Sort final results for clean visualization
+    pair_results.sort(key=lambda x: (-x['confidence'], -x['similarity']))
+
+    findings.append({
+        'source_1': art_i['source'],
+        'source_2': art_j['source'],
+        'results': pair_results[:8] # Maximum top relevant unique findings displayed
+    })
 
     return findings
