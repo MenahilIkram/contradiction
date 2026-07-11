@@ -44,6 +44,18 @@ def extract_sentences(text: str, max_sentences: int = 100) -> list:
             
     return unique_sentences[:max_sentences]
 
+# ─── Helper Logic For Numbers Tracking ────────────────────────────────────────
+
+def contains_numerical_mismatch(s1: str, s2: str) -> bool:
+    """Check karta hai ke kya dono sentences mein alag alag digits/numbers hain."""
+    nums1 = set(re.findall(r'\d+', s1))
+    nums2 = set(re.findall(r'\d+', s2))
+    
+    # Agar dono mein numbers hain aur wo matching nahi hain (e.g. 4.5 vs 1.8)
+    if nums1 and nums2 and (nums1 != nums2):
+        return True
+    return False
+
 
 # ─── Main Analysis Engine ─────────────────────────────────────────────────────
 
@@ -77,8 +89,7 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             for idx_j, s2 in enumerate(art_j['sentences']):
                 sim_score = float(cosine_scores[idx_i][idx_j])
 
-                # 🛡️ RELAXED SIMILARITY FILTER (0.38)
-                # Taake 'cheaper' vs 'viable' jese alag words miss na hon
+                # Relaxed similarity threshold taake synonyms pass ho sakein
                 if sim_score < 0.38:
                     continue
                 
@@ -88,7 +99,7 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
         if not pairs_forward:
             continue
 
-        # Single batch processing (Super Fast)
+        # Large batch inference optimized for 100 max sentences
         raw_scores_f = nli_model.predict(pairs_forward, batch_size=64, show_progress_bar=False)
         
         for idx in range(len(metadata_pairs)):
@@ -97,12 +108,16 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             conf_f = float(probs_f[pred_idx_f])
             label_f = LABEL_MAP.get(pred_idx_f, "neutral")
 
-            # 🔥 THE BALANCED PRECISION FILTER (0.85 Sweet Spot)
-            # Sahi wali 3 contradictions isse upar hain, 4th false positive automatic drop ho jayegi.
-            if label_f == 'contradiction' and conf_f > 0.85:
-                meta = metadata_pairs[idx]
+            meta = metadata_pairs[idx]
+
+            # Dynamic Threshold Selection
+            # Agar text mein numbers ka mismatch hai toh criteria thoda soft (0.75) rakhenge
+            # Kyunki numeric differences are highly likely to be absolute contradictions.
+            required_threshold = 0.75 if contains_numerical_mismatch(meta['s1'], meta['s2']) else 0.85
+
+            if label_f == 'contradiction' and conf_f > required_threshold:
                 
-                # Duplicate entries filter taake cross-matching na ho
+                # Duplicate cross-entry validation logic
                 is_duplicate = False
                 for existing in pair_results:
                     if existing['sentence_1'] == meta['s1'] or existing['sentence_2'] == meta['s2']:
@@ -119,13 +134,13 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
                         'similarity': meta['sim_score']
                     })
 
-        # Sort by high confidence
+        # Sorting results based on critical alignment metrics
         pair_results.sort(key=lambda x: (-x['confidence'], -x['similarity']))
 
         findings.append({
             'source_1': art_i['source'],
             'source_2': art_j['source'],
-            'results': pair_results[:8]
+            'results': pair_results[:12] # Core structural contradiction threshold window expanded
         })
 
     return findings
