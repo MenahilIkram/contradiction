@@ -9,13 +9,21 @@ import streamlit as st
 
 @st.cache_resource(show_spinner=False)
 def load_model():
+    """HIGH ACCURACY SOTA NLI Model - DeBERTa-v3-base"""
     return CrossEncoder('cross-encoder/nli-deberta-v3-base')
 
 @st.cache_resource(show_spinner=False)
 def load_similarity_model():
+    """HIGH ACCURACY Similarity Model - MPNET-base-v2"""
     return SentenceTransformer('all-mpnet-base-v2') 
 
+
+# ─── Config & Labels ──────────────────────────────────────────────────────────
+
 LABEL_MAP = {0: "contradiction", 1: "entailment", 2: "neutral"}
+LABEL_EMOJI = {"contradiction": "❌", "entailment": "✅", "neutral": "🤷"}
+LABEL_COLOR = {"contradiction": "#ff4b4b", "entailment": "#00c853", "neutral": "#888888"}
+
 
 # ─── Text Processing ──────────────────────────────────────────────────────────
 
@@ -36,26 +44,10 @@ def extract_sentences(text: str, max_sentences: int = 30) -> list:
             
     return unique_sentences[:max_sentences]
 
-# ─── Dynamic Non-Hardcoded Content Overlap Filter ─────────────────────────────
 
-def get_meaningful_tokens(sentence: str) -> set:
-    """Sentence se useless words (stop words) nikal kar major context tokens nikalta hai."""
-    stop_words = {
-        'the', 'a', 'an', 'and', 'but', 'if', 'or', 'because', 'as', 'until', 'while',
-        'of', 'at', 'by', 'for', 'with', 'about', 'against', 'between', 'into', 'through',
-        'during', 'before', 'after', 'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out',
-        'on', 'off', 'over', 'under', 'again', 'further', 'then', 'once', 'here', 'there',
-        'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most',
-        'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
-        's', 't', 'can', 'will', 'just', 'don', 'should', 'now', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-        'have', 'has', 'had', 'having', 'do', 'does', 'did', 'doing', 'continue', 'continue to', 'significantly'
-    }
-    # Clean, lowercase and extract words longer than 2 characters
-    words = re.findall(r'\b[a-zA-Z]{3,}\b', sentence.lower())
-    return {w for w in words if w not in stop_words}
+# ─── Main Analysis Engine ─────────────────────────────────────────────────────
 
-
-  def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, articles: list) -> list:
+def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, articles: list) -> list:
     parsed = []
     for art in articles:
         sents = extract_sentences(art.get('text', ''))
@@ -86,7 +78,6 @@ def get_meaningful_tokens(sentence: str) -> set:
             for idx_j, s2 in enumerate(art_j['sentences']):
                 sim_score = float(cosine_scores[idx_i][idx_j])
 
-                # Context similarity standard threshold
                 if sim_score < 0.42:
                     continue
                 
@@ -101,22 +92,16 @@ def get_meaningful_tokens(sentence: str) -> set:
         raw_scores_b = nli_model.predict(pairs_backward, batch_size=16, show_progress_bar=False)
         
         for idx in range(len(metadata_pairs)):
-            # Forward Direction (S1 -> S2)
             probs_f = F.softmax(torch.tensor(raw_scores_f[idx]), dim=0)
             pred_idx_f = int(probs_f.argmax())
             conf_f = float(probs_f[pred_idx_f])
             label_f = LABEL_MAP.get(pred_idx_f, "neutral")
 
-            # Backward Direction (S2 -> S1)
             probs_b = F.softmax(torch.tensor(raw_scores_b[idx]), dim=0)
             pred_idx_b = int(probs_b.argmax())
             conf_b = float(probs_b[pred_idx_b])
             label_b = LABEL_MAP.get(pred_idx_b, "neutral")
 
-            # 🔥 HIGH-PRECISION MATHEMATICAL FILTER (No Hardcoding)
-            # 1. Dono models ko strict contradiction agree karni chahiye.
-            # 2. Confidence threshold ko 0.95 rakha hai kyunki core contradictions hamesha 99% pe aati hain.
-            # 3. False positive (89% wala) is threshold ki wajah se automatic eliminate ho jayega.
             if label_f == 'contradiction' and label_b == 'contradiction':
                 if conf_f >= 0.95 and conf_b >= 0.95:
                     meta = metadata_pairs[idx]
@@ -128,7 +113,6 @@ def get_meaningful_tokens(sentence: str) -> set:
                         'similarity': meta['sim_score']
                     })
 
-        # Top contradiction values ko sort karein
         pair_results.sort(key=lambda x: (-x['confidence'], -x['similarity']))
 
         findings.append({
@@ -138,4 +122,3 @@ def get_meaningful_tokens(sentence: str) -> set:
         })
 
     return findings
-
