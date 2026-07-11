@@ -70,22 +70,21 @@ def is_factual(sentence: str) -> bool:
 def is_too_vague(sentence: str) -> bool:
     """
     Vague sentences filter karta hai jo contradiction ke liye useless hain.
-    
+
     Vague sentence hoti hai jab:
-    - Bohat choti ho (40 words se kam characters)
-    - Sirf opinion ho (said, stated, mentioned, claimed - bina fact ke)
-    - Generic filler words hon
+    - 5 words se kam ho (genuinely incomplete)
+    - Sirf generic filler ho bina kisi claim ke
     """
 
-    # Too short
-    if len(sentence) < 50:
+    # 5 words se kam = incomplete sentence
+    if len(sentence.split()) < 5:
         return True
 
-    # Sirf "someone said something" — no actual fact
+    # Clearly useless patterns
     vague_patterns = [
-        r'^(he|she|they|it|this|that)\s+(is|was|are|were)\s+\w+\.$',
+        r'^(he|she|they|it)\s+(is|was|are|were)\s+\w+\.$',
         r'\b(very|quite|really|extremely)\s+(bad|good|important|serious)\b',
-        r'^(officials?|authorities|government)\s+said\s+the\s+situation',
+        r'^(officials?|authorities)\s+said\s+the\s+situation',
     ]
     sentence_lower = sentence.lower().strip()
     for pattern in vague_patterns:
@@ -155,43 +154,53 @@ def score_sentence(sentence: str) -> int:
     return score
 
 
-def extract_sentences(text: str, max_sentences: int = 6) -> list[str]:
+def extract_sentences(text: str,
+                       max_factual: int = 5,
+                       max_other: int = 4) -> list[str]:
     """
-    Main function — article text se top factual sentences nikalta hai.
-    
+    Main function — article text se top sentences nikalta hai.
+
+    IMPORTANT: Dono types rakho —
+    - Factual (numbers/currency/death words): numeric contradictions ke liye
+    - Non-factual (pure language): semantic contradictions ke liye
+      jaise "safe" vs "dangerous", "won" vs "lost", "helped" vs "damaged"
+
     Pipeline:
     1. Text ko sentences mein split karo
-    2. Clean karo (whitespace, etc.)
+    2. Clean karo
     3. Vague/too-short sentences filter karo
-    4. Factual sentences prefer karo
-    5. Duplicates remove karo
-    6. Score ke basis pe sort karo
-    7. Top N return karo
+    4. Factual aur non-factual alag karo
+    5. Dono se duplicates hatao
+    6. Factual ko score se sort karo
+    7. Dono se alag alag limit le ke combine karo
     """
 
     # Step 1: Split into sentences
     raw = re.split(r'(?<=[.!?])\s+', text)
 
-    # Step 2: Clean each sentence
+    # Step 2: Clean
     sentences = [clean_text(s) for s in raw if clean_text(s)]
 
-    # Step 3: Remove vague/too-short sentences
+    # Step 3: Remove vague sentences
     sentences = [s for s in sentences if not is_too_vague(s)]
 
     # Step 4: Separate factual vs non-factual
     factual = [s for s in sentences if is_factual(s)]
     other   = [s for s in sentences if not is_factual(s)]
 
-    # Step 5: Remove duplicates from factual sentences
+    # Step 5: Remove duplicates from both
     factual = remove_duplicates(factual)
+    other   = remove_duplicates(other)
 
-    # Step 6: Sort factual sentences by score (highest first)
+    # Step 6: Sort factual by importance score
     factual = sorted(factual, key=score_sentence, reverse=True)
 
-    # Step 7: Combine — factual first, then others as backup
-    combined = factual + other
+    # Step 7: Take from BOTH — dono types cover honge
+    # Factual: numbers/currency/death = numeric contradictions
+    # Other: language-based = semantic contradictions
+    combined = factual[:max_factual] + other[:max_other]
 
-    return combined[:max_sentences]
+    return combined
 
 
 def classify_pair(model: CrossEncoder, sent1: str, sent2: str) -> tuple[str, float]:
