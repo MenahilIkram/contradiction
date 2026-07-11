@@ -19,9 +19,21 @@ def load_similarity_model():
     return SentenceTransformer('all-MiniLM-L6-v2')
 
 
+
 # ─── Labels ───────────────────────────────────────────────────────────────────
 
 LABEL_MAP = {0: "contradiction", 1: "entailment", 2: "neutral"}
+
+LABEL_EMOJI = {
+    "contradiction": "❌",
+    "entailment":    "✅",
+    "neutral":       "🤷"
+}
+LABEL_COLOR = {
+    "contradiction": "#ff4b4b",
+    "entailment":    "#00c853",
+    "neutral":       "#888888"
+}
 
 
 # ─── Text Cleaning & Extraction ───────────────────────────────────────────────
