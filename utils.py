@@ -147,34 +147,48 @@ def are_same_topic(sim_model: SentenceTransformer, s1: str, s2: str, threshold: 
     return similarity >= threshold
 
 
-# ─── Smart Context & Categories ──────────────────────────────────────────────
+# ─── Precise Sub-Metric Extraction ───────────────────────────────────────────
 
-def get_numerical_category(sentence: str) -> str:
-    """Sentence ke numerical context ko identify karta hai taake galat comparisons na hon."""
+def get_sub_metric(sentence: str) -> str:
+    """ Sentence ke exact data metric ko pakadta hai taake ghalti ka chance zero ho """
     s = sentence.lower()
     
-    # 1. Casualties (Deaths)
+    # 1. Deaths / Casualties
     if any(w in s for w in ['killed', 'died', 'dead', 'deaths', 'casualties', 'death toll', 'toll']):
-        return 'casualty'
+        return 'deaths'
         
-    # 2. Economic / Money Loss
-    if any(w in s for w in ['dollar', 'dollars', '$', 'financial', 'economic', 'losses', 'damage cost', 'appeal']):
-        return 'economic'
+    # 2. Financial / Economic Losses
+    if any(w in s for w in ['losses', 'financial damage', 'economic losses', 'total financial damage', 'damage was calculated at']):
+        if any(w in s for w in ['billion', 'million', 'dollar', '$', 'euros', 'pounds']):
+            return 'financial_loss'
+            
+    # 3. Infrastructure / Houses Damaged (Strictly physical structures, not displacement)
+    if any(w in s for w in ['houses', 'homes', 'structures', 'residential structures', 'residential']) and any(w in s for w in ['destroyed', 'damage', 'destruction', 'sustained']):
+        if 'displaced' not in s and 'homeless' not in s:
+            return 'houses_destroyed'
+            
+    # 4. Displaced People (Explicitly forced to move / evacuated)
+    if 'displaced' in s or 'homeless' in s:
+        return 'people_displaced'
+    if 'evacuations' in s or 'evacuated' in s:
+        if 'affected over' in s or 'affected' in s:
+            return 'people_affected'  # "affected 33M forcing evacuations" -> 33M refers to affected
+        return 'people_displaced'
         
-    # 3. Infrastructure / Houses
-    if any(w in s for w in ['houses', 'homes', 'residential', 'structures', 'buildings', 'property damage']):
-        return 'infrastructure'
+    # 5. General Affected Population (Impacted citizens)
+    if 'affected' in s and any(w in s for w in ['citizens', 'people', 'population']):
+        return 'people_affected'
         
-    # 4. Displaced / Affected People
-    if any(w in s for w in ['displaced', 'affected', 'evacuations', 'evacuated', 'citizens', 'people', 'humanitarian']):
-        return 'population_affected'
+    # 6. Humanitarian Assistance Needed (People requiring aid)
+    if 'assistance' in s or 'humanitarian' in s or 'relief' in s:
+        return 'need_assistance'
         
     return 'other'
 
 
 def extract_numbers_general(text: str) -> list:
     text = text.lower()
-    # Years filter out karo (e.g. 2022)
+    # Years filter out karo (e.g. 2022) ko hatao taake calculation kharab na ho
     text = re.sub(r'\b(in\s+)?(19|20)\d{2}\b', ' ', text)
     
     numbers = []
@@ -185,13 +199,13 @@ def extract_numbers_general(text: str) -> list:
     for match in re.finditer(r'(\d+\.?\d*)\s*thousand', text):
         numbers.append(float(match.group(1)) * 1_000)
 
-    # Commas hatayein
+    # Commas hatayein (1,700 -> 1700)
     text = re.sub(r'\b(\d{1,3})(?:,\d{3})+\b', lambda m: m.group(0).replace(',', ''), text)
 
     for match in re.finditer(r'\b(\d+\.?\d*)\b', text):
         try:
             val = float(match.group(1))
-            if val >= 10:  # Chote numbers ignore
+            if val >= 10:  # Context ke chote numbers ko ignore karo
                 numbers.append(val)
         except ValueError:
             continue
@@ -218,7 +232,7 @@ def detect_numerical_contradiction(s1: str, s2: str) -> tuple:
         confidence = min(0.99, 0.65 + diff_pct)
         return 'contradiction', round(confidence, 2)
 
-    # Agar farq kam hai to iska matlab figures agree kar rahe hain!
+    # Agar farq 20% se kam hai to iska matlab figures agree kar rahe hain (Entailment)
     return 'entailment', 0.85
 
 
@@ -254,32 +268,33 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
                 if not are_same_topic(sim_model, s1, s2):
                     continue
 
-                # Step 2: Base NLI Prediction
-                label, conf = classify_pair(nli_model, s1, s2)
-
-                # Step 3: Categories & Number Extraction
-                cat1 = get_numerical_category(s1)
-                cat2 = get_numerical_category(s2)
+                # Step 2: Exact Sub-Metric Extraction
+                sub1 = get_sub_metric(s1)
+                sub2 = get_sub_metric(s2)
+                
                 has_num1 = len(extract_numbers_general(s1)) > 0
                 has_num2 = len(extract_numbers_general(s2)) > 0
 
-                # ── GUARDRAILS ──
-                
-                # Guardrail A: Agar dono mein numbers hain par metrics alag hain (e.g., deaths vs displaced)
-                # To NLI ka 'contradiction' claim bilkul false positive hai. Force it to Neutral!
-                if has_num1 and has_num2 and cat1 != cat2:
-                    if label == 'contradiction':
-                        label = 'neutral'
-                        conf = 1.0
+                # Step 3: Base NLI Prediction
+                label, conf = classify_pair(nli_model, s1, s2)
 
-                # Guardrail B: Agar dono SAME metric par baat kar rahe hain, to rule-based logic chalao
-                elif cat1 != 'other' and cat1 == cat2:
-                    num_label, num_conf = detect_numerical_contradiction(s1, s2)
-                    if num_label is not None:
-                        label = num_label
-                        conf = num_conf
+                # ── MACHINE LEARNING + RULE-BASED GUARDRAILS ──
+                if has_num1 and has_num2:
+                    # Case A: Metrics bilkul same hain aur factual hain (e.g., deaths vs deaths)
+                    if sub1 != 'other' and sub1 == sub2:
+                        num_label, num_conf = detect_numerical_contradiction(s1, s2)
+                        if num_label is not None:
+                            label = num_label
+                            conf = num_conf
+                    
+                    # Case B: Metrics different hain (e.g., houses destroyed vs people displaced)
+                    # Lekin model ne bewakoofi mein contradiction boldia. Override to Neutral!
+                    else:
+                        if label == 'contradiction':
+                            label = 'neutral'
+                            conf = 1.0
 
-                # Faltu noise clean karne ke liye low confidence neutral filter out karein
+                # Low confidence neutral pairs ko filter out karein taake UI saaf rahe
                 if label == 'neutral' and conf < 0.75:
                     continue
 
@@ -290,7 +305,7 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
                     'confidence': conf
                 })
 
-        # Sort: Contradictions sabse upar
+        # Sort: Contradictions sabse pehle, high confidence ke sath
         pair_results.sort(key=lambda x: (x['label'] != 'contradiction', -x['confidence']))
 
         findings.append({
