@@ -10,200 +10,106 @@ import streamlit as st
 
 @st.cache_resource(show_spinner=False)
 def load_model():
-    """NLI CrossEncoder — Language aur Meaning ke liye."""
+    """NLI Model - For detecting Contradiction / Entailment"""
     return CrossEncoder('cross-encoder/nli-MiniLM2-L6-H768')
 
 @st.cache_resource(show_spinner=False)
 def load_similarity_model():
-    """Sentence Transformer — Sirf performance boost (unrelated sentences skip karne) ke liye."""
-    return SentenceTransformer('all-MiniLM-L6-v2')
+    """Similarity Model - To find matching sentences before NLI"""
+    # Agar possible ho toh 'all-mpnet-base-v2' use karna, wo zyada accurate hai
+    return SentenceTransformer('all-MiniLM-L6-v2') 
 
 
-
-# ─── Labels ───────────────────────────────────────────────────────────────────
+# ─── Config & Labels ──────────────────────────────────────────────────────────
 
 LABEL_MAP = {0: "contradiction", 1: "entailment", 2: "neutral"}
-
-LABEL_EMOJI = {
-    "contradiction": "❌",
-    "entailment":    "✅",
-    "neutral":       "🤷"
-}
-LABEL_COLOR = {
-    "contradiction": "#ff4b4b",
-    "entailment":    "#00c853",
-    "neutral":       "#888888"
-}
+LABEL_EMOJI = {"contradiction": "❌", "entailment": "✅", "neutral": "🤷"}
+LABEL_COLOR = {"contradiction": "#ff4b4b", "entailment": "#00c853", "neutral": "#888888"}
 
 
-# ─── Text Cleaning & Extraction ───────────────────────────────────────────────
+# ─── Text Processing ──────────────────────────────────────────────────────────
 
 def clean_text(text: str) -> str:
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
-def remove_duplicates(sentences: list, threshold: float = 0.85) -> list:
-    unique = []
-    for sent in sentences:
-        words_new = set(sent.lower().split())
-        is_dup = False
-        for existing in unique:
-            words_ex = set(existing.lower().split())
-            if not words_new or not words_ex: continue
-            sim = len(words_new & words_ex) / len(words_new | words_ex)
-            if sim >= threshold:
-                is_dup = True
-                break
-        if not is_dup:
-            unique.append(sent)
-    return unique
-
 def extract_sentences(text: str, max_sentences: int = 15) -> list:
+    """Paragraphs ko sentences mein break karta hai aur chote/faltu sentences remove karta hai."""
     raw = re.split(r'(?<=[.!?])\s+', text)
-    sentences = [clean_text(s) for s in raw if len(clean_text(s).split()) >= 4]
-    sentences = sorted(sentences, key=lambda x: len(x.split()), reverse=True)
-    unique_sentences = remove_duplicates(sentences)
+    sentences = [clean_text(s) for s in raw if len(clean_text(s).split()) >= 5]
+    
+    unique_sentences = []
+    for s in sentences:
+        if s not in unique_sentences:
+            unique_sentences.append(s)
+            
     return unique_sentences[:max_sentences]
 
 
-# ─── Pure AI "Number Masking" System ──────────────────────────────────────────
-
-def normalize_numbers_for_nli(sentence: str) -> str:
-    """
-    Transformers ko bewakoof banne se rokne ke liye sab numbers ko '999' banata hai
-    taake wo sirf English grammar/meaning pe focus kare.
-    """
-    s = sentence.lower()
-    # 1. Years ko safe rakho (1900s, 2000s) taake context na toote
-    s = re.sub(r'\b(in\s+)?(19|20)\d{2}\b', ' [YEAR] ', s)
-    # 2. Saare actual numbers ko '999' se replace kardo
-    s = re.sub(r'\b\d+(?:,\d{3})*(?:\.\d+)?\b', '999', s)
-    # 3. Scales aur modifiers uda do taake comparing asaan ho
-    s = re.sub(r'\b(million|billion|trillion|thousand|hundred|around|about|approximately|nearly|over|under)\b', '', s)
-    # Clean spaces
-    s = re.sub(r'\s+', ' ', s)
-    return s.strip()
-
-def extract_numbers_general(text: str) -> list:
-    text = text.lower()
-    text = re.sub(r'\b(in\s+)?(19|20)\d{2}\b', ' ', text) # Ignore years
-    numbers = []
-    for match in re.finditer(r'(\d+\.?\d*)\s*billion', text): numbers.append(float(match.group(1)) * 1_000_000_000)
-    for match in re.finditer(r'(\d+\.?\d*)\s*million', text): numbers.append(float(match.group(1)) * 1_000_000)
-    text = re.sub(r'\b(\d{1,3})(?:,\d{3})+\b', lambda m: m.group(0).replace(',', ''), text)
-    for match in re.finditer(r'\b(\d+\.?\d*)\b', text):
-        try:
-            val = float(match.group(1))
-            if val != 0: numbers.append(val)
-        except ValueError: continue
-    return numbers
-
-def detect_numerical_contradiction(nums1: list, nums2: list) -> tuple:
-    if not nums1 or not nums2: return None, 0.0
-    n1, n2 = max(nums1), max(nums2)
-    diff_pct = abs(n1 - n2) / max(n1, n2)
-    # 20% Variance Rule
-    if diff_pct > 0.20:
-        return 'contradiction', round(min(0.99, 0.65 + diff_pct), 2)
-    return 'entailment', 0.85
-
-
-# ─── NLI Classification ──────────────────────────────────────────────────────
-
-def classify_pair(nli_model: CrossEncoder, sent1: str, sent2: str) -> tuple:
-    raw_scores = nli_model.predict([(sent1, sent2)])[0]
-    probs      = F.softmax(torch.tensor(raw_scores), dim=0)
-    pred_idx   = int(probs.argmax())
-    confidence = float(probs[pred_idx])
-    return LABEL_MAP[pred_idx], confidence
-
-def are_same_topic(sim_model: SentenceTransformer, s1: str, s2: str, threshold: float = 0.25) -> bool:
-    """Sirf bilkul unrelated sentences ko skip karta hai performance bachane ke liye (Loose Threshold)."""
-    emb1 = sim_model.encode(s1, convert_to_tensor=True)
-    emb2 = sim_model.encode(s2, convert_to_tensor=True)
-    return float(util.cos_sim(emb1, emb2)) >= threshold
-
-
-# ─── Main Analysis Engine ─────────────────────────────────────────────────────
-
-# ─── Main Analysis Engine ─────────────────────────────────────────────────────
+# ─── Main Analysis Engine (The Best Approach) ─────────────────────────────────
 
 def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, articles: list) -> list:
+    # Step 1: Har article ke sentences aur unke embeddings (vectors) ek hi baar nikal lo
     parsed = []
     for art in articles:
         sents = extract_sentences(art['text'])
-        parsed.append({'source': art['source'], 'sentences': sents})
+        # Embeddings calculate kar ke store kar rahe hain taake fast ho
+        embeddings = sim_model.encode(sents, convert_to_tensor=True) if sents else None
+        parsed.append({
+            'source': art['source'], 
+            'sentences': sents,
+            'embeddings': embeddings
+        })
 
     findings = []
 
+    # Step 2: Articles ko pairs mein compare karo (A vs B, B vs C, etc.)
     for i, j in combinations(range(len(parsed)), 2):
         art_i = parsed[i]
         art_j = parsed[j]
         pair_results = []
 
-        for s1 in art_i['sentences']:
-            for s2 in art_j['sentences']:
+        if art_i['embeddings'] is None or art_j['embeddings'] is None:
+            continue
 
-                # Step 1: Broad Topic Match (Buhat loose threshold just to drop complete garbage)
-                if not are_same_topic(sim_model, s1, s2, threshold=0.25):
+        # ✨ THE MAGIC: Pura Matrix ek sath compare ho raha hai (Super Fast)
+        cosine_scores = util.cos_sim(art_i['embeddings'], art_j['embeddings'])
+
+        for idx_i, s1 in enumerate(art_i['sentences']):
+            for idx_j, s2 in enumerate(art_j['sentences']):
+                
+                sim_score = float(cosine_scores[idx_i][idx_j])
+
+                # 🛡️ STRICT SEMANTIC FILTER:
+                # Agar sentences exactly ek hi topic (e.g., dono deaths, ya dono budget) 
+                # ki baat nahi kar rahe, toh NLI ko bhej kar confuse nahi karna.
+                if sim_score < 0.55:
                     continue
 
-                # Step 2: AI's First Impression
-                label, conf = classify_pair(nli_model, s1, s2)
+                # Agar similarity 55% se zyada hai, tabhi NLI se check karwao
+                raw_scores = nli_model.predict([(s1, s2)])[0]
+                probs = F.softmax(torch.tensor(raw_scores), dim=0)
+                pred_idx = int(probs.argmax())
+                conf = float(probs[pred_idx])
+                label = LABEL_MAP[pred_idx]
 
-                # Step 3: Extract Numbers
-                nums1 = extract_numbers_general(s1)
-                nums2 = extract_numbers_general(s2)
+                # Sirf solid contradictions ko hi list mein daalo
+                if label == 'contradiction' and conf > 0.65:
+                    pair_results.append({
+                        'sentence_1': s1,
+                        'sentence_2': s2,
+                        'label': label,
+                        'confidence': conf,
+                        'similarity': sim_score
+                    })
 
-                # 🧠 THE DOUBLE GUARDRAIL (Apples vs Oranges Fix) 🧠
-                if nums1 and nums2:
-                    # Numbers ko 999 kardo
-                    s1_norm = normalize_numbers_for_nli(s1)
-                    s2_norm = normalize_numbers_for_nli(s2)
-                    norm_label, _ = classify_pair(nli_model, s1_norm, s2_norm)
+        # Jo sentences aapas mein sabse zyada similar the (par contradict kar gaye), unko top pe rakho
+        pair_results.sort(key=lambda x: -x['similarity'])
 
-                    # Model ne contradiction bola hai, ab hum test karenge ke context same tha ya nahi
-                    if label == 'contradiction':
-                        # Semantic Check: Kya numbers hatane ke baad sentences ek hi metric (e.g., deaths) ki baat kar rahe hain?
-                        emb_n1 = sim_model.encode(s1_norm, convert_to_tensor=True)
-                        emb_n2 = sim_model.encode(s2_norm, convert_to_tensor=True)
-                        norm_sim = float(util.cos_sim(emb_n1, emb_n2))
-
-                        # Agar masked sentences ka structure alag hai (< 0.45) e.g., Deaths vs Dollars
-                        # Toh ye actual contradiction nahi hai, isko neutral kardo!
-                        if norm_label == 'neutral' or norm_sim < 0.45:
-                            label = 'neutral'
-                            conf = 1.0 
-                            
-                    elif label in ['entailment', 'neutral']:
-                        # Agar sentences exactly same baat kar rahe hain, bas numbers alag hain
-                        if norm_label == 'entailment':
-                            num_label, num_conf = detect_numerical_contradiction(nums1, nums2)
-                            if num_label == 'contradiction':
-                                label = 'contradiction'
-                                conf = num_conf
-
-                # Step 4: Output Filtering
-                if label == 'neutral':
-                    continue  
-
-                pair_results.append({
-                    'sentence_1': s1,
-                    'sentence_2': s2,
-                    'label':      label,
-                    'confidence': conf
-                })
-
-        # Sort Results (Contradictions on top)
-        pair_results.sort(key=lambda x: (x['label'] != 'contradiction', -x['confidence']))
-
-        # Agar result same source sentences ke beech me bhi contradiction bana raha tha, hum usko already pairs combination se handle kar chuke.
         findings.append({
             'source_1': art_i['source'],
             'source_2': art_j['source'],
-            'results':  pair_results[:8]
+            'results': pair_results[:5]  # Top 5 most relevant contradictions
         })
 
     return findings
-
- 
