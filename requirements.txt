@@ -2,3 +2,5 @@ streamlit
 sentence-transformers
 torch
 transformers
+pypdf
+python-docx
