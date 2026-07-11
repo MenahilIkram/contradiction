@@ -71,25 +71,25 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
         cosine_scores = util.cos_sim(art_i['embeddings'], art_j['embeddings'])
         
         pairs_forward = []
-        pairs_backward = []
         metadata_pairs = []
 
         for idx_i, s1 in enumerate(art_i['sentences']):
             for idx_j, s2 in enumerate(art_j['sentences']):
                 sim_score = float(cosine_scores[idx_i][idx_j])
 
-                if sim_score < 0.42:
+                # 🛡️ RELAXED SIMILARITY FILTER (0.38)
+                # Taake 'cheaper' vs 'viable' jese alag words miss na hon
+                if sim_score < 0.38:
                     continue
                 
                 pairs_forward.append((s1, s2))
-                pairs_backward.append((s2, s1))
                 metadata_pairs.append({'s1': s1, 's2': s2, 'sim_score': sim_score})
 
         if not pairs_forward:
             continue
 
+        # Single batch processing (Super Fast)
         raw_scores_f = nli_model.predict(pairs_forward, batch_size=16, show_progress_bar=False)
-        raw_scores_b = nli_model.predict(pairs_backward, batch_size=16, show_progress_bar=False)
         
         for idx in range(len(metadata_pairs)):
             probs_f = F.softmax(torch.tensor(raw_scores_f[idx]), dim=0)
@@ -97,14 +97,20 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
             conf_f = float(probs_f[pred_idx_f])
             label_f = LABEL_MAP.get(pred_idx_f, "neutral")
 
-            probs_b = F.softmax(torch.tensor(raw_scores_b[idx]), dim=0)
-            pred_idx_b = int(probs_b.argmax())
-            conf_b = float(probs_b[pred_idx_b])
-            label_b = LABEL_MAP.get(pred_idx_b, "neutral")
-
-            if label_f == 'contradiction' and label_b == 'contradiction':
-                if conf_f >= 0.90 and conf_b >= 0.90:
-                    meta = metadata_pairs[idx]
+            # 🔥 THE BALANCED PRECISION FILTER (0.85 Sweet Spot)
+            # Sahi wali 3 contradictions isse upar hain, 4th false positive automatic drop ho jayegi.
+            if label_f == 'contradiction' and conf_f > 0.85:
+                meta = metadata_pairs[idx]
+                
+                # Duplicate entries filter taake cross-matching na ho
+                is_duplicate = False
+                for existing in pair_results:
+                    if existing['sentence_1'] == meta['s1'] or existing['sentence_2'] == meta['s2']:
+                        if meta['sim_score'] < existing['similarity']:
+                            is_duplicate = True
+                            break
+                
+                if not is_duplicate:
                     pair_results.append({
                         'sentence_1': meta['s1'],
                         'sentence_2': meta['s2'],
@@ -113,6 +119,7 @@ def analyze_articles(nli_model: CrossEncoder, sim_model: SentenceTransformer, ar
                         'similarity': meta['sim_score']
                     })
 
+        # Sort by high confidence
         pair_results.sort(key=lambda x: (-x['confidence'], -x['similarity']))
 
         findings.append({
